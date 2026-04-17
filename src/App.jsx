@@ -7,6 +7,8 @@ const TOKEN_REGEX = new RegExp(
 );
 const SECURITY_REGEX =
   /\b(authorization|cookie|set-cookie|token|bearer|csrf|password|secret|session|jwt|api[-_ ]?key)\b/i;
+const SECURITY_REASON_REGEX =
+  /\b(authorization|cookie|set-cookie|token|bearer|csrf|password|secret|session|jwt|api[-_ ]?key)\b/gi;
 
 function prettyJson(value) {
   if (!value) {
@@ -113,6 +115,29 @@ function CodeBlock({ sections }) {
   );
 }
 
+function getSecurityReasons(exchange) {
+  const text = [
+    exchange.request?.url || "",
+    prettyJson(exchange.request?.headers),
+    exchange.request?.postData || "",
+    exchange.response?.url || "",
+    prettyJson(exchange.response?.headers),
+    exchange.response?.bodyPreview || ""
+  ].join("\n");
+
+  const matches = text.match(SECURITY_REASON_REGEX) || [];
+  return [...new Set(matches.map((value) => value.toLowerCase()))];
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
 async function readJsonSafely(response) {
   const rawText = await response.text();
 
@@ -200,13 +225,13 @@ function ReplayModal({
 
 export default function App() {
   const [domain, setDomain] = useState(
-    () => window.localStorage.getItem("http-viewer-domain") || ""
+    () => window.localStorage.getItem("http-analyzer-domain") || ""
   );
   const [excludeInput, setExcludeInput] = useState(
-    () => window.localStorage.getItem("http-viewer-exclude-patterns") || ""
+    () => window.localStorage.getItem("http-analyzer-exclude-patterns") || ""
   );
   const [securityOnly, setSecurityOnly] = useState(
-    () => window.localStorage.getItem("http-viewer-security-only") === "true"
+    () => window.localStorage.getItem("http-analyzer-security-only") === "true"
   );
   const [statusMessage, setStatusMessage] = useState("");
   const [active, setActive] = useState(false);
@@ -267,15 +292,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem("http-viewer-domain", domain);
+    window.localStorage.setItem("http-analyzer-domain", domain);
   }, [domain]);
 
   useEffect(() => {
-    window.localStorage.setItem("http-viewer-exclude-patterns", excludeInput);
+    window.localStorage.setItem("http-analyzer-exclude-patterns", excludeInput);
   }, [excludeInput]);
 
   useEffect(() => {
-    window.localStorage.setItem("http-viewer-security-only", String(securityOnly));
+    window.localStorage.setItem("http-analyzer-security-only", String(securityOnly));
   }, [securityOnly]);
 
   async function startCapture(event) {
@@ -325,6 +350,98 @@ export default function App() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  function downloadHtmlReport() {
+    const sections = visibleExchanges
+      .map((exchange, index) => {
+        const requestTitle = exchange.request
+          ? `${exchange.request.method} ${exchange.request.url}`
+          : "(request unavailable)";
+        const requestMeta = exchange.request
+          ? `${exchange.request.resourceType} · ${exchange.timestamp}`
+          : exchange.timestamp;
+        const responseTitle = exchange.response
+          ? `${exchange.response.status} ${exchange.response.url}`
+          : "(pending response)";
+        const responseMeta = exchange.response
+          ? `${exchange.response.statusText} · ${exchange.response.timestamp}`
+          : "";
+
+        return `
+          <section class="pair-card">
+            <div class="pair-index">#${index + 1}</div>
+            <div class="pair-grid">
+              <article class="box request">
+                <div class="chip request-chip">REQUEST</div>
+                <h3>${escapeHtml(requestTitle)}</h3>
+                <p class="meta">${escapeHtml(requestMeta)}</p>
+                <pre>${escapeHtml(`Headers\n${prettyJson(exchange.request?.headers)}\n\nBody\n${
+                  exchange.request?.postData || "(empty)"
+                }`)}</pre>
+              </article>
+              <article class="box response">
+                <div class="chip response-chip">RESPONSE</div>
+                <h3>${escapeHtml(responseTitle)}</h3>
+                <p class="meta">${escapeHtml(responseMeta)}</p>
+                <pre>${escapeHtml(`Headers\n${prettyJson(exchange.response?.headers)}\n\nBody Preview\n${
+                  exchange.response?.bodyPreview || "(binary, empty, or pending)"
+                }`)}</pre>
+              </article>
+            </div>
+          </section>
+        `;
+      })
+      .join("");
+
+    const html = `<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HTTP Analyzer Report</title>
+  <style>
+    body{margin:0;padding:24px;background:#eef2f6;color:#172033;font-family:"KoPubDotum","KoPub돋움체",sans-serif}
+    .wrap{max-width:1400px;margin:0 auto}
+    .hero{padding:20px 24px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
+    .hero h1{margin:0 0 8px;font-size:28px}
+    .hero p{margin:4px 0;color:#475569}
+    .pair-card{margin-top:16px;padding:16px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 10px 24px rgba(15,23,42,.06)}
+    .pair-index{margin-bottom:10px;font-weight:700;color:#64748b}
+    .pair-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+    .box{padding:14px;border-radius:12px}
+    .request{background:#eef7ff;border:1px solid #c7defc}
+    .response{background:#fff6ec;border:1px solid #ffd5b5}
+    .chip{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:700;margin-bottom:10px}
+    .request-chip{background:#dbeafe;color:#1d4ed8}
+    .response-chip{background:#ffedd5;color:#c2410c}
+    h3{margin:0 0 6px;font-size:16px;word-break:break-all}
+    .meta{margin:0 0 12px;color:#64748b;font-size:13px}
+    pre{margin:0;padding:12px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.4;color:#334155}
+    @media (max-width: 900px){.pair-grid{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="hero">
+      <h1>HTTP Analyzer Report</h1>
+      <p><strong>Domain:</strong> ${escapeHtml(domain || "-")}</p>
+      <p><strong>Excluded:</strong> ${escapeHtml(excludeInput || "-")}</p>
+      <p><strong>Security Check:</strong> ${securityOnly ? "ON" : "OFF"}</p>
+      <p><strong>Visible Pairs:</strong> ${visibleExchanges.length}</p>
+    </section>
+    ${sections}
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const blobUrl = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl;
+    anchor.download = `http-analyzer-report-${Date.now()}.html`;
+    anchor.click();
+    URL.revokeObjectURL(blobUrl);
   }
 
   function openReplayModal(exchange) {
@@ -381,7 +498,7 @@ export default function App() {
       <section className="hero-card filter-shell">
         <div className="topbar">
           <div>
-            <h1 className="page-title">HTTP Capture Console</h1>
+            <h1 className="page-title">HTTP Analyzer</h1>
           </div>
           <div className="topbar-badges">
             <span className={`capture-badge ${active ? "live" : ""}`}>
@@ -400,7 +517,7 @@ export default function App() {
 
         <form className="capture-form filter-bar" onSubmit={startCapture}>
           <label className="field-label field-card">
-            <span>URL</span>
+            <span>URL:</span>
             <input
               type="text"
               placeholder="도메인 입력"
@@ -409,7 +526,7 @@ export default function App() {
             />
           </label>
           <label className="field-label field-card">
-            <span>Excluded</span>
+            <span>Excluded:</span>
             <input
               type="text"
               placeholder="제외 패턴 입력"
@@ -424,6 +541,9 @@ export default function App() {
             <button type="button" disabled={submitting || !active} onClick={stopCapture}>
               캡처 중지
             </button>
+            <button type="button" disabled={visibleExchanges.length === 0} onClick={downloadHtmlReport}>
+              HTML 출력
+            </button>
           </div>
         </form>
 
@@ -435,15 +555,18 @@ export default function App() {
 
       <section className="pair-list">
         <article className="panel">
-          <div className="panel-header">
-            <span>{visibleExchanges.length}</span>
-          </div>
           <div className="entry-list">
             {visibleExchanges
               .slice()
               .reverse()
               .map((exchange) => (
                 <article key={exchange.id} className="exchange-card">
+                  {getSecurityReasons(exchange).length > 0 ? (
+                    <div className="security-reason-bar">
+                      <strong>Security Check Reason:</strong>
+                      <span>{getSecurityReasons(exchange).join(", ")}</span>
+                    </div>
+                  ) : null}
                   <button
                     type="button"
                     className="exchange-column interactive-column"
@@ -451,11 +574,10 @@ export default function App() {
                   >
                     <div className="entry-title-row">
                       <span className="panel-chip request-chip">REQUEST</span>
-                      <strong>
-                        {exchange.request
-                          ? `${exchange.request.method} ${exchange.request.url}`
-                          : "(request unavailable)"}
-                      </strong>
+                      <strong>{exchange.request?.method || "(request unavailable)"}</strong>
+                      {exchange.request?.url ? (
+                        <span className="url-line">{exchange.request.url}</span>
+                      ) : null}
                       <span>
                         {exchange.request
                           ? `${exchange.request.resourceType} · ${exchange.timestamp}`
@@ -474,10 +596,11 @@ export default function App() {
                     <div className="entry-title-row">
                       <span className="panel-chip response-chip">RESPONSE</span>
                       <strong>
-                        {exchange.response
-                          ? `${exchange.response.status} ${exchange.response.url}`
-                          : "(pending response)"}
+                        {exchange.response ? String(exchange.response.status) : "(pending response)"}
                       </strong>
+                      {exchange.response?.url ? (
+                        <span className="url-line">{exchange.response.url}</span>
+                      ) : null}
                       <span>
                         {exchange.response
                           ? `${exchange.response.statusText} · ${exchange.response.timestamp}`

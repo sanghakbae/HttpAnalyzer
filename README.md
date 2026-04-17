@@ -1,4 +1,4 @@
-# HTTP Viewer
+# HTTP Analyzer
 
 `mitmproxy`로 특정 HTTP 요청/응답을 가로채고, `React + Vite` 프런트엔드에서 HAR 파일을 업로드해 분석하는 예제 프로젝트입니다.
 
