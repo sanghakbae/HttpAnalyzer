@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
+const GOOGLE_CLIENT_ID =
+  "924920443826-k59m97pgabmdb42qv9cq63plmuuvvn7s.apps.googleusercontent.com";
+const AUTH_STORAGE_KEY = "http-analyzer-auth-user";
+const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const TOKEN_REGEX = new RegExp(
   `("(?:\\\\.|[^"])*":)|("(?:\\\\.|[^"])*")|('(?:\\\\.|[^'])*')|(<!--.*?-->)|(<!DOCTYPE[^>]*>)|(</?[\\w:-]+[^>]*>)|\\b\\d+(?:\\.\\d+)?\\b|\\btrue\\b|\\bfalse\\b|\\bnull\\b|[{}\\[\\](),:]`,
   "g"
@@ -100,6 +104,19 @@ function setStoredValue(key, value) {
     window.localStorage.setItem(key, value);
   } catch {
     return;
+  }
+}
+
+function getStoredJson(key, fallback = null) {
+  const raw = getStoredValue(key);
+  if (!raw) {
+    return fallback;
+  }
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
   }
 }
 
@@ -511,6 +528,49 @@ function downloadTextFile(content, fileName, type = "text/plain;charset=utf-8") 
   anchor.download = fileName;
   anchor.click();
   URL.revokeObjectURL(blobUrl);
+}
+
+function buildInspectionConclusion({ totalFindings, criticalFindings, highFindings, totalErrors }) {
+  if (criticalFindings > 0) {
+    return "즉시 조치 필요: Critical finding이 존재하므로 우선 차단과 원인 분석이 필요합니다.";
+  }
+
+  if (highFindings > 0) {
+    return "우선 개선 권장: High finding이 존재하므로 재현 검증 후 빠른 시정이 필요합니다.";
+  }
+
+  if (totalFindings > 0 || totalErrors > 0) {
+    return "추가 검토 필요: 치명 이슈는 없지만 보안 징후 또는 오류 응답이 보여 후속 점검이 필요합니다.";
+  }
+
+  return "양호: 현재 캡처 범위에서는 두드러진 보안 이상 징후가 확인되지 않았습니다.";
+}
+
+function buildPeriodStats(runs) {
+  const today = new Date();
+  const windows = [
+    { key: "7d", label: "최근 7일", days: 7 },
+    { key: "30d", label: "최근 30일", days: 30 }
+  ];
+
+  return windows.map((windowInfo) => {
+    const threshold = new Date(today);
+    threshold.setDate(threshold.getDate() - (windowInfo.days - 1));
+
+    const filtered = runs.filter((item) => {
+      const createdAt = new Date(item.created_at || item.ended_at || item.started_at || 0);
+      return !Number.isNaN(createdAt.getTime()) && createdAt >= threshold;
+    });
+
+    return {
+      ...windowInfo,
+      runCount: filtered.length,
+      totalFindings: filtered.reduce((sum, item) => sum + Number(item.total_findings || 0), 0),
+      criticalFindings: filtered.reduce((sum, item) => sum + Number(item.critical_findings || 0), 0),
+      highFindings: filtered.reduce((sum, item) => sum + Number(item.high_findings || 0), 0),
+      totalExchanges: filtered.reduce((sum, item) => sum + Number(item.total_exchanges || 0), 0)
+    };
+  });
 }
 
 function generateFindingPoc(finding, exchange) {
@@ -1340,6 +1400,50 @@ function escapeHtml(value) {
     .replaceAll("'", "&#39;");
 }
 
+function formatDateTime(value) {
+  if (!value) {
+    return "-";
+  }
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  return date.toLocaleString("ko-KR");
+}
+
+function decodeJwtPayload(token) {
+  if (!token || typeof window === "undefined") {
+    return null;
+  }
+
+  try {
+    const [, payload] = token.split(".");
+    if (!payload) {
+      return null;
+    }
+
+    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
+    const binary = window.atob(padded);
+    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+    const decoded = new TextDecoder("utf-8").decode(bytes);
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
+
+function getStoredAuthUser() {
+  const user = getStoredJson(AUTH_STORAGE_KEY);
+  if (!user || typeof user !== "object") {
+    return null;
+  }
+
+  return user.email ? user : null;
+}
+
 async function readJsonSafely(response) {
   const rawText = await response.text();
 
@@ -1354,6 +1458,112 @@ async function readJsonSafely(response) {
       rawText
     };
   }
+}
+
+function LoginScreen({ onLogin }) {
+  const [loginError, setLoginError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    function renderGoogleButton() {
+      if (cancelled || typeof window === "undefined" || !window.google?.accounts?.id) {
+        return;
+      }
+
+      const buttonRoot = document.getElementById("google-login-button");
+      if (!buttonRoot) {
+        return;
+      }
+
+      buttonRoot.innerHTML = "";
+      window.google.accounts.id.initialize({
+        client_id: GOOGLE_CLIENT_ID,
+        callback: (response) => {
+          const payload = decodeJwtPayload(response?.credential);
+          if (!payload?.email) {
+            setLoginError("구글 로그인 응답을 해석하지 못했습니다.");
+            return;
+          }
+
+          if (String(payload.email).toLowerCase() !== ALLOWED_GOOGLE_EMAIL) {
+            setLoginError(`허용된 계정만 접속할 수 있습니다: ${ALLOWED_GOOGLE_EMAIL}`);
+            return;
+          }
+
+          setLoginError("");
+          onLogin({
+            id: payload.sub,
+            email: payload.email,
+            name: payload.name || payload.email,
+            picture: payload.picture || "",
+            credential: response.credential
+          });
+        }
+      });
+      window.google.accounts.id.renderButton(buttonRoot, {
+        theme: "outline",
+        size: "large",
+        shape: "pill",
+        text: "signin_with",
+        width: 320
+      });
+    }
+
+    if (window.google?.accounts?.id) {
+      renderGoogleButton();
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    const existingScript = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
+    if (existingScript) {
+      existingScript.addEventListener("load", renderGoogleButton);
+      existingScript.addEventListener("error", () =>
+        setLoginError("구글 로그인 스크립트를 불러오지 못했습니다.")
+      );
+
+      return () => {
+        cancelled = true;
+        existingScript.removeEventListener("load", renderGoogleButton);
+      };
+    }
+
+    const script = document.createElement("script");
+    script.src = "https://accounts.google.com/gsi/client";
+    script.async = true;
+    script.defer = true;
+    script.onload = renderGoogleButton;
+    script.onerror = () => setLoginError("구글 로그인 스크립트를 불러오지 못했습니다.");
+    document.head.appendChild(script);
+
+    return () => {
+      cancelled = true;
+      script.onload = null;
+      script.onerror = null;
+    };
+  }, [onLogin]);
+
+  return (
+    <main className="login-shell">
+      <section className="login-card">
+        <p className="login-eyebrow">Google Sign-In</p>
+        <h1 className="page-title">HTTP Analyzer Login</h1>
+        <p className="login-copy">
+          캡처와 HAR 분석 화면에 들어가기 전에 구글 계정으로 로그인하세요. 로그인 정보는
+          이 브라우저에만 저장됩니다.
+        </p>
+        <p className="login-copy">
+          허용된 계정: <strong>{ALLOWED_GOOGLE_EMAIL}</strong>
+        </p>
+        <div className="login-actions">
+          <div id="google-login-button" className="google-login-button" />
+          {loginError ? <div className="error-strip">{loginError}</div> : null}
+        </div>
+      </section>
+    </main>
+  );
 }
 
 function ReplayModal({
@@ -1427,7 +1637,103 @@ function ReplayModal({
   );
 }
 
+function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
+  if (!run) {
+    return null;
+  }
+
+  const snapshot = run.report_snapshot || {};
+  const summary = snapshot.summary || {};
+  const conclusion = snapshot.conclusion || buildInspectionConclusion({
+    totalFindings: run.total_findings,
+    criticalFindings: run.critical_findings,
+    highFindings: run.high_findings,
+    totalErrors: run.total_errors
+  });
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-shell inspection-modal-shell" onClick={(event) => event.stopPropagation()}>
+        <div className="inspection-modal-header">
+          <div>
+            <h2 className="section-title">점검 이력 상세</h2>
+            <p className="section-copy">{run.target_url || "-"}</p>
+          </div>
+          <div className="action-row">
+            <button type="button" onClick={() => onDownloadHtml(run)}>
+              HTML 재다운로드
+            </button>
+            <button type="button" onClick={() => onDownloadPdf(run)}>
+              PDF 재다운로드
+            </button>
+            <button type="button" onClick={onClose}>
+              닫기
+            </button>
+          </div>
+        </div>
+        <div className="inspection-modal-grid">
+          <div className="recent-card">
+            <strong>표지 정보</strong>
+            <span>점검자: {snapshot.inspector || "-"}</span>
+            <span>점검 일시: {formatDateTime(run.started_at)} ~ {formatDateTime(run.ended_at)}</span>
+            <span>세션: {run.capture_session_id || "-"}</span>
+          </div>
+          <div className="recent-card">
+            <strong>결론</strong>
+            <span>{conclusion}</span>
+          </div>
+          <div className="recent-card">
+            <strong>요약 지표</strong>
+            <span>요청 {run.total_exchanges}건 / 에러 {run.total_errors}건</span>
+            <span>Finding {run.total_findings}건 / Critical {run.critical_findings} / High {run.high_findings}</span>
+            <span>Security Only: {run.security_only ? "ON" : "OFF"} / Mask: {run.mask_sensitive ? "ON" : "OFF"}</span>
+          </div>
+          <div className="recent-card">
+            <strong>제외 패턴</strong>
+            <span>{Array.isArray(run.excluded_patterns) && run.excluded_patterns.length > 0 ? run.excluded_patterns.join(", ") : "-"}</span>
+          </div>
+          <div className="recent-card inspection-modal-wide">
+            <strong>OWASP Summary</strong>
+            <div className="owasp-overview-chips">
+              {(run.owasp_summary || []).map((item) => (
+                <span key={`${run.id}-${item.key}`} className="owasp-chip">
+                  {item.label} ({item.count})
+                </span>
+              ))}
+            </div>
+          </div>
+          <div className="recent-card inspection-modal-wide">
+            <strong>Endpoint Priority Snapshot</strong>
+            <div className="endpoint-overview-list">
+              {(run.endpoint_summary || []).map((item) => (
+                <div key={`${run.id}-${item.endpoint}`} className="endpoint-card">
+                  <span className="endpoint-title">{item.endpoint}</span>
+                  <span>Score: {item.score}</span>
+                  <span>Findings: {item.findings}</span>
+                  <span>Highest: {item.highestSeverityLabel || item.highestSeverity}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+          {summary && Object.keys(summary).length > 0 ? (
+            <div className="recent-card inspection-modal-wide">
+              <strong>저장된 리포트 메타</strong>
+              <span>Visible Pairs: {summary.visiblePairs ?? "-"}</span>
+              <span>총 Findings: {summary.totalFindings ?? "-"}</span>
+              <span>생성 시각: {formatDateTime(snapshot.exportedAt)}</span>
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
+  const [activeSection, setActiveSection] = useState(() =>
+    getStoredValue("http-analyzer-active-section", "overview")
+  );
   const [domain, setDomain] = useState(() => getStoredValue("http-analyzer-domain"));
   const [excludeInput, setExcludeInput] = useState(() =>
     getStoredValue("http-analyzer-exclude-patterns")
@@ -1462,6 +1768,8 @@ export default function App() {
   });
   const [statusMessage, setStatusMessage] = useState("");
   const [active, setActive] = useState(false);
+  const [captureSessionId, setCaptureSessionId] = useState("");
+  const [captureStartedAt, setCaptureStartedAt] = useState("");
   const [exchanges, setExchanges] = useState([]);
   const [errors, setErrors] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -1469,6 +1777,15 @@ export default function App() {
   const [replayResponse, setReplayResponse] = useState(null);
   const [replayLoading, setReplayLoading] = useState(false);
   const [replayError, setReplayError] = useState("");
+  const [inspectionModalRun, setInspectionModalRun] = useState(null);
+  const [harFile, setHarFile] = useState(null);
+  const [harUploading, setHarUploading] = useState(false);
+  const [harUploadResult, setHarUploadResult] = useState(null);
+  const [harUploadError, setHarUploadError] = useState("");
+  const [recentHarAnalyses, setRecentHarAnalyses] = useState([]);
+  const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
+  const [recentInspectionRuns, setRecentInspectionRuns] = useState([]);
+  const [recentLoading, setRecentLoading] = useState(false);
 
   const liveExcludePatterns = getCombinedExcludePatterns(excludeInput);
 
@@ -1487,6 +1804,7 @@ export default function App() {
   const endpointSummary = summarizeEndpoints(analyzedExchanges);
   const criticalAlerts = allSecurityFindings.filter((finding) => finding.severity === "critical");
   const highAlerts = allSecurityFindings.filter((finding) => finding.severity === "high");
+  const periodStats = buildPeriodStats(recentInspectionRuns);
 
   const exchangesWithDiffs = analyzedExchanges.map((exchange, index) => {
     const previous = analyzedExchanges
@@ -1520,12 +1838,25 @@ export default function App() {
   });
 
   useEffect(() => {
+    if (authUser) {
+      setStoredValue(AUTH_STORAGE_KEY, JSON.stringify(authUser));
+      return;
+    }
+
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    }
+  }, [authUser]);
+
+  useEffect(() => {
     const syncCaptureStatus = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/capture/status`);
         if (!response.ok) return;
         const data = await response.json();
         setActive(Boolean(data.active));
+        setCaptureSessionId(data.sessionId || "");
+        setCaptureStartedAt(data.startedAt || "");
         setExchanges(data.exchanges || []);
         setErrors(data.errors || []);
 
@@ -1554,6 +1885,31 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const loadRecentAnalyses = async () => {
+      setRecentLoading(true);
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/recent-analyses`);
+        if (!response.ok) {
+          return;
+        }
+
+        const data = await response.json();
+        setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
+        setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
+        setRecentInspectionRuns(Array.isArray(data.inspectionRuns) ? data.inspectionRuns : []);
+      } catch {
+        return;
+      } finally {
+        setRecentLoading(false);
+      }
+    };
+
+    loadRecentAnalyses();
+    const timer = window.setInterval(loadRecentAnalyses, 15000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     setStoredValue("http-analyzer-domain", domain);
   }, [domain]);
 
@@ -1568,6 +1924,10 @@ export default function App() {
   useEffect(() => {
     setStoredValue("http-analyzer-mask-sensitive", String(maskSensitive));
   }, [maskSensitive]);
+
+  useEffect(() => {
+    setStoredValue("http-analyzer-active-section", activeSection);
+  }, [activeSection]);
 
   useEffect(() => {
     setStoredValue("http-analyzer-suppressed-findings", JSON.stringify(suppressedFindings));
@@ -1608,6 +1968,8 @@ export default function App() {
       const result = data || {};
 
       setStatusMessage("");
+      setCaptureSessionId(result.sessionId || "");
+      setCaptureStartedAt(result.startedAt || "");
       setExchanges([]);
       setErrors([]);
     } catch (error) {
@@ -1622,13 +1984,101 @@ export default function App() {
     setStatusMessage("");
 
     try {
+      const snapshot = buildInspectionSnapshot();
+      if (captureSessionId || domain) {
+        await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            capture_session_id: captureSessionId || null,
+            target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
+            started_at: captureStartedAt || null,
+            ended_at: new Date().toISOString(),
+            total_exchanges: analyzedExchanges.length,
+            total_errors: errors.length,
+            total_findings: allSecurityFindings.length,
+            critical_findings: criticalAlerts.length,
+            high_findings: highAlerts.length,
+            security_only: securityOnly,
+            mask_sensitive: maskSensitive,
+            excluded_patterns: getCombinedExcludePatterns(excludeInput),
+            owasp_summary: owaspSummary,
+            endpoint_summary: endpointSummary.slice(0, 10),
+            report_snapshot: snapshot
+          })
+        }).catch(() => {});
+      }
+
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
       setStatusMessage("");
       setActive(false);
+      setCaptureSessionId("");
+      setCaptureStartedAt("");
+
+      try {
+        const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`);
+        if (recentResponse.ok) {
+          const recentData = await recentResponse.json();
+          setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
+          setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
+          setRecentInspectionRuns(
+            Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
+          );
+        }
+      } catch {
+        return;
+      }
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function uploadHarFile() {
+    if (!harFile) {
+      setHarUploadError("HAR 파일을 먼저 선택해주세요.");
+      return;
+    }
+
+    setHarUploading(true);
+    setHarUploadError("");
+    setHarUploadResult(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("har", harFile);
+
+      const response = await fetch(`${API_BASE_URL}/api/analyze-har`, {
+        method: "POST",
+        body: formData
+      });
+
+      const { data, rawText } = await readJsonSafely(response);
+
+      if (!response.ok) {
+        throw new Error(data?.error || data?.message || rawText || "HAR 업로드에 실패했습니다.");
+      }
+
+      setHarUploadResult(data || null);
+
+      try {
+        const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`);
+        if (recentResponse.ok) {
+          const recentData = await recentResponse.json();
+          setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
+          setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
+          setRecentInspectionRuns(
+            Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
+          );
+        }
+      } catch {
+        return;
+      }
+    } catch (error) {
+      setHarUploadError(error.message);
+    } finally {
+      setHarUploading(false);
     }
   }
 
@@ -1676,11 +2126,29 @@ export default function App() {
     });
   }
 
-  function downloadHtmlReport() {
-    const sections = visibleExchanges
+  function buildHtmlReportDocument(reportInput = {}, { forPrint = false } = {}) {
+    const reportDomain = reportInput.domain ?? domain;
+    const reportExcluded = reportInput.excluded ?? getCombinedExcludePatterns(excludeInput);
+    const reportSecurityOnly = reportInput.securityOnly ?? securityOnly;
+    const reportMaskSensitive = reportInput.maskSensitive ?? maskSensitive;
+    const reportOwaspSummary = reportInput.owaspSummary ?? owaspSummary;
+    const reportEndpointSummary = reportInput.endpointSummary ?? endpointSummary;
+    const reportInspector = reportInput.inspector ?? authUser?.email ?? "-";
+    const reportExportedAt = reportInput.exportedAt ?? new Date().toISOString();
+    const reportConclusion =
+      reportInput.conclusion ||
+      buildInspectionConclusion({
+        totalFindings: reportInput.totalFindings ?? allSecurityFindings.length,
+        criticalFindings: reportInput.criticalFindings ?? criticalAlerts.length,
+        highFindings: reportInput.highFindings ?? highAlerts.length,
+        totalErrors: reportInput.totalErrors ?? errors.length
+      });
+    const reportExchanges = reportInput.exchanges ?? visibleExchanges;
+
+    const sections = reportExchanges
       .map((exchange, index) => {
         const requestTitle = exchange.request
-          ? `${exchange.request.method} ${maybeMask(exchange.request.url, maskSensitive)}`
+          ? `${exchange.request.method} ${maybeMask(exchange.request.url, reportMaskSensitive)}`
           : "(request unavailable)";
         const requestMeta = exchange.request
           ? `${exchange.request.resourceType} · ${exchange.timestamp}`
@@ -1713,7 +2181,7 @@ export default function App() {
                         </div>
                         <p><strong>OWASP:</strong> ${escapeHtml(finding.owaspLabel)}</p>
                         <p><strong>Area:</strong> ${escapeHtml(finding.area)}</p>
-                        <p><strong>Evidence:</strong> ${escapeHtml(maybeMask(finding.evidence, maskSensitive))}</p>
+                        <p><strong>Evidence:</strong> ${escapeHtml(maybeMask(finding.evidence, reportMaskSensitive))}</p>
                         <p><strong>Guide:</strong> ${escapeHtml(finding.guide)}</p>
                         <p><strong>Remediation:</strong> ${escapeHtml(finding.remediation)}</p>
                         <p><strong>Confidence:</strong> ${escapeHtml(finding.confidenceLabel)}</p>
@@ -1740,16 +2208,16 @@ export default function App() {
                 <div class="chip request-chip">REQUEST</div>
                 <h3>${escapeHtml(requestTitle)}</h3>
                 <p class="meta">${escapeHtml(requestMeta)}</p>
-                <pre>${escapeHtml(`Headers\n${maybeMask(prettyJson(exchange.request?.headers), maskSensitive)}\n\nBody\n${
-                  maybeMask(exchange.request?.postData || "(empty)", maskSensitive)
+                <pre>${escapeHtml(`Headers\n${maybeMask(prettyJson(exchange.request?.headers), reportMaskSensitive)}\n\nBody\n${
+                  maybeMask(exchange.request?.postData || "(empty)", reportMaskSensitive)
                 }`)}</pre>
               </article>
               <article class="box response">
                 <div class="chip response-chip">RESPONSE</div>
                 <h3>${escapeHtml(responseTitle)}</h3>
                 <p class="meta">${escapeHtml(responseMeta)}</p>
-                <pre>${escapeHtml(`Headers\n${maybeMask(prettyJson(exchange.response?.headers), maskSensitive)}\n\nBody Preview\n${
-                  maybeMask(exchange.response?.bodyPreview || "(binary, empty, or pending)", maskSensitive)
+                <pre>${escapeHtml(`Headers\n${maybeMask(prettyJson(exchange.response?.headers), reportMaskSensitive)}\n\nBody Preview\n${
+                  maybeMask(exchange.response?.bodyPreview || "(binary, empty, or pending)", reportMaskSensitive)
                 }`)}</pre>
               </article>
             </div>
@@ -1759,7 +2227,7 @@ export default function App() {
       })
       .join("");
 
-    const html = `<!doctype html>
+    return `<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
@@ -1768,6 +2236,10 @@ export default function App() {
   <style>
     body{margin:0;padding:24px;background:#eef2f6;color:#172033;font-family:"KoPubDotum","KoPub돋움체",sans-serif}
     .wrap{max-width:1400px;margin:0 auto}
+    .cover{padding:28px;border-radius:20px;background:linear-gradient(180deg,#e8f3eb,#dff1e6);border:1px solid #b9ddc4;box-shadow:0 12px 32px rgba(15,23,42,.08);margin-bottom:16px}
+    .cover h1{margin:0 0 10px;font-size:34px}
+    .cover p{margin:6px 0;color:#355240}
+    .conclusion{margin-top:16px;padding:14px 16px;border-radius:14px;background:#fff;border:1px solid #d8e0ea}
     .hero{padding:20px 24px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
     .hero h1{margin:0 0 8px;font-size:28px}
     .hero p{margin:4px 0;color:#475569}
@@ -1795,25 +2267,117 @@ export default function App() {
     .meta{margin:0 0 12px;color:#64748b;font-size:13px}
     pre{margin:0;padding:12px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.4;color:#334155}
     @media (max-width: 900px){.pair-grid{grid-template-columns:1fr}}
+    @media print{body{background:#fff;padding:0}.wrap{max-width:none}.pair-card,.hero{box-shadow:none}${forPrint ? "" : ""}}
   </style>
 </head>
 <body>
   <div class="wrap">
+    <section class="cover">
+      <h1>HTTP Analyzer Security Inspection Report</h1>
+      <p><strong>점검자:</strong> ${escapeHtml(reportInspector)}</p>
+      <p><strong>점검 일시:</strong> ${escapeHtml(formatDateTime(reportExportedAt))}</p>
+      <p><strong>대상:</strong> ${escapeHtml(reportDomain || "-")}</p>
+      <div class="conclusion">
+        <strong>결론</strong>
+        <p>${escapeHtml(reportConclusion)}</p>
+      </div>
+    </section>
     <section class="hero">
       <h1>HTTP Analyzer Report</h1>
-      <p><strong>Domain:</strong> ${escapeHtml(domain || "-")}</p>
-      <p><strong>Excluded:</strong> ${escapeHtml(getCombinedExcludePatterns(excludeInput).join(", "))}</p>
-      <p><strong>Security Check:</strong> ${securityOnly ? "ON" : "OFF"}</p>
-      <p><strong>Visible Pairs:</strong> ${visibleExchanges.length}</p>
-      <p><strong>Mask Sensitive:</strong> ${maskSensitive ? "ON" : "OFF"}</p>
+      <p><strong>Domain:</strong> ${escapeHtml(reportDomain || "-")}</p>
+      <p><strong>Excluded:</strong> ${escapeHtml(reportExcluded.join(", "))}</p>
+      <p><strong>Security Check:</strong> ${reportSecurityOnly ? "ON" : "OFF"}</p>
+      <p><strong>Visible Pairs:</strong> ${reportExchanges.length}</p>
+      <p><strong>Mask Sensitive:</strong> ${reportMaskSensitive ? "ON" : "OFF"}</p>
+      <p><strong>OWASP Summary:</strong> ${escapeHtml(
+        reportOwaspSummary.map((item) => `${item.label}(${item.count})`).join(", ") || "-"
+      )}</p>
+      <p><strong>Top Endpoints:</strong> ${escapeHtml(
+        reportEndpointSummary.slice(0, 3).map((item) => item.endpoint).join(", ") || "-"
+      )}</p>
     </section>
     ${sections}
   </div>
 </body>
-</html>`;
+<\/html>`;
+  }
 
+  function buildInspectionSnapshot() {
+    return {
+      exportedAt: new Date().toISOString(),
+      inspector: authUser?.email || "-",
+      domain,
+      excluded: getCombinedExcludePatterns(excludeInput),
+      securityOnly,
+      maskSensitive,
+      totalErrors: errors.length,
+      totalFindings: allSecurityFindings.length,
+      criticalFindings: criticalAlerts.length,
+      highFindings: highAlerts.length,
+      conclusion: buildInspectionConclusion({
+        totalFindings: allSecurityFindings.length,
+        criticalFindings: criticalAlerts.length,
+        highFindings: highAlerts.length,
+        totalErrors: errors.length
+      }),
+      owaspSummary,
+      endpointSummary,
+      summary: {
+        visiblePairs: visibleExchanges.length,
+        totalFindings: allSecurityFindings.length
+      },
+      exchanges: visibleExchanges.map((exchange) => ({
+        ...exchange,
+        securityFindings: (exchange.securityFindings || []).map((finding) => ({
+          ...finding,
+          evidence: maybeMask(finding.evidence, maskSensitive)
+        })),
+        request: exchange.request
+          ? {
+              ...exchange.request,
+              url: maybeMask(exchange.request.url || "", maskSensitive),
+              headers: exchange.request.headers,
+              postData: maybeMask(exchange.request.postData || "", maskSensitive)
+            }
+          : null,
+        response: exchange.response
+          ? {
+              ...exchange.response,
+              url: maybeMask(exchange.response.url || "", maskSensitive),
+              headers: exchange.response.headers,
+              bodyPreview: maybeMask(exchange.response.bodyPreview || "", maskSensitive)
+            }
+          : null
+      }))
+    };
+  }
+
+  function downloadHtmlReport(snapshot = buildInspectionSnapshot()) {
+    const html = buildHtmlReportDocument(snapshot);
     downloadTextFile(html, `http-analyzer-report-${Date.now()}.html`, "text/html;charset=utf-8");
   }
+
+  function downloadPdfReport(snapshot = buildInspectionSnapshot()) {
+    const html = buildHtmlReportDocument(snapshot, { forPrint: true });
+    const reportWindow = window.open("", "_blank", "noopener,noreferrer");
+
+    if (!reportWindow) {
+      setStatusMessage("팝업이 차단되어 PDF 리포트를 열 수 없습니다.");
+      return;
+    }
+
+    reportWindow.document.open();
+    reportWindow.document.write(html.replace(
+      "</body>",
+      `<script>
+window.addEventListener("load", () => {
+  setTimeout(() => window.print(), 250);
+});
+</script></body>`
+    ));
+    reportWindow.document.close();
+  }
+
 
   function downloadJsonReport() {
     const payload = {
@@ -1973,149 +2537,574 @@ export default function App() {
     }
   }
 
+  function handleLogin(user) {
+    setAuthUser(user);
+  }
+
+  function handleLogout() {
+    setAuthUser(null);
+    if (typeof window !== "undefined" && window.google?.accounts?.id) {
+      window.google.accounts.id.disableAutoSelect();
+    }
+  }
+
+  function openInspectionRun(run) {
+    setInspectionModalRun(run);
+  }
+
+  if (!authUser) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
+
+  const findingEntries = visibleExchanges.flatMap((exchange) =>
+    (exchange.securityFindings || []).map((finding) => ({ exchange, finding }))
+  );
+
+  const navigationItems = [
+    {
+      key: "overview",
+      label: "Overview",
+      description: "위험도와 요약 현황",
+      count: allSecurityFindings.length
+    },
+    {
+      key: "capture",
+      label: "Capture",
+      description: "실시간 캡처와 요청 목록",
+      count: visibleExchanges.length
+    },
+    {
+      key: "findings",
+      label: "Findings",
+      description: "탐지된 보안 이슈",
+      count: findingEntries.length
+    },
+    {
+      key: "har",
+      label: "HAR",
+      description: "파일 업로드와 분석 결과",
+      count: recentHarAnalyses.length
+    },
+    {
+      key: "recent",
+      label: "Recent Data",
+      description: "최근 저장된 캡처 기록",
+      count: recentCaptureEvents.length + recentInspectionRuns.length
+    }
+  ];
+
   return (
     <main className="page-shell">
-      <section className="hero-card filter-shell">
-        <div className="topbar">
-          <div>
+      <div className="app-layout">
+        <aside className="sidebar-card">
+          <div className="sidebar-brand">
+            <p className="eyebrow">Workspace</p>
             <h1 className="page-title">HTTP Analyzer</h1>
+            <p className="sidebar-copy">기능별로 화면을 나눠서 필요한 작업만 집중해서 볼 수 있게 정리했습니다.</p>
           </div>
-          <div className="topbar-badges">
-            <span className={`capture-badge ${active ? "live" : ""}`}>
-              {active ? "LIVE" : "IDLE"}
-            </span>
-            <label className="security-toggle">
-              <input
-                type="checkbox"
-                checked={securityOnly}
-                onChange={(event) => setSecurityOnly(event.target.checked)}
-              />
-              <span>Security Check</span>
-            </label>
-            <label className="security-toggle">
-              <input
-                type="checkbox"
-                checked={maskSensitive}
-                onChange={(event) => setMaskSensitive(event.target.checked)}
-              />
-              <span>Mask Secrets</span>
-            </label>
-          </div>
-        </div>
+          <nav className="sidebar-nav">
+            {navigationItems.map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                className={`sidebar-nav-item ${activeSection === item.key ? "active" : ""}`}
+                onClick={() => setActiveSection(item.key)}
+              >
+                <span className="sidebar-nav-label">{item.label}</span>
+                <span className="sidebar-nav-description">{item.description}</span>
+                <span className="sidebar-nav-count">{item.count}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
 
-        <form className="capture-form filter-bar" onSubmit={startCapture}>
-          <label className="field-label field-card">
-            <span>URL:</span>
-            <input
-              type="text"
-              placeholder="도메인 입력"
-              value={domain}
-              onChange={(event) => setDomain(event.target.value)}
-            />
-          </label>
-          <label className="field-label field-card">
-            <span>Excluded:</span>
-            <input
-              type="text"
-              placeholder="추가 제외 패턴 입력"
-              value={excludeInput}
-              onChange={(event) => setExcludeInput(event.target.value)}
-            />
-          </label>
-          <p className="field-hint">
-            이미지 요청은 항상 제외됩니다. 여기에 입력하는 값은 추가 제외 패턴입니다.
-          </p>
-          <div className="action-row action-card">
-            <button type="submit" disabled={submitting || active}>
-              {submitting ? "처리 중..." : "캡처 시작"}
-            </button>
-            <button type="button" disabled={submitting || !active} onClick={stopCapture}>
-              캡처 중지
-            </button>
-            <details className="export-menu">
-              <summary className={visibleExchanges.length === 0 ? "disabled-summary" : ""}>
-                Export
-              </summary>
-              <div className="export-menu-list">
-                <button type="button" disabled={visibleExchanges.length === 0} onClick={downloadHtmlReport}>
-                  HTML 출력
-                </button>
-                <button type="button" disabled={visibleExchanges.length === 0} onClick={downloadJsonReport}>
-                  JSON 출력
-                </button>
-                <button type="button" disabled={visibleExchanges.length === 0} onClick={downloadMarkdownReport}>
-                  MD 출력
-                </button>
-                <button type="button" disabled={visibleExchanges.length === 0} onClick={downloadCsvReport}>
-                  CSV 출력
+        <div className="content-shell">
+          <section className="hero-card filter-shell">
+            <div className="topbar">
+              <div>
+                <h1 className="page-title">HTTP Analyzer</h1>
+              </div>
+              <div className="topbar-badges">
+                <div className="login-user-copy">
+                  {authUser.picture ? (
+                    <img src={authUser.picture} alt={authUser.name} className="user-avatar" />
+                  ) : null}
+                  <div>
+                    <strong>{authUser.name}</strong>
+                    <span>{authUser.email}</span>
+                  </div>
+                </div>
+                <span className={`capture-badge ${active ? "live" : ""}`}>
+                  {active ? "LIVE" : "IDLE"}
+                </span>
+                <label className="security-toggle">
+                  <input
+                    type="checkbox"
+                    checked={securityOnly}
+                    onChange={(event) => setSecurityOnly(event.target.checked)}
+                  />
+                  <span>Security Check</span>
+                </label>
+                <label className="security-toggle">
+                  <input
+                    type="checkbox"
+                    checked={maskSensitive}
+                    onChange={(event) => setMaskSensitive(event.target.checked)}
+                  />
+                  <span>Mask Secrets</span>
+                </label>
+                <button type="button" className="logout-button" onClick={handleLogout}>
+                  로그아웃
                 </button>
               </div>
-            </details>
-            <button
-              type="button"
-              disabled={suppressedFindings.length + sessionSuppressedFindings.length === 0}
-              onClick={clearSuppressedFindings}
-            >
-              오탐 초기화
-            </button>
-          </div>
-        </form>
-
-        {statusMessage ? <p className="status">{statusMessage}</p> : null}
-        {errors.length > 0 ? (
-          <div className="error-strip">{errors[errors.length - 1]?.errorText}</div>
-        ) : null}
-        {criticalAlerts.length > 0 ? (
-          <div className="alert-banner critical-banner">
-            Critical findings {criticalAlerts.length}건이 감지되었습니다. 우선 `URL 민감정보`, `응답 본문 비밀값`, `위험한 CORS`를 먼저 확인하는 것을 권장합니다.
-          </div>
-        ) : null}
-        {criticalAlerts.length === 0 && highAlerts.length > 0 ? (
-          <div className="alert-banner high-banner">
-            High findings {highAlerts.length}건이 감지되었습니다. 엔드포인트 우선순위와 재현 체크리스트를 따라 순서대로 검증해보면 됩니다.
-          </div>
-        ) : null}
-        {owaspSummary.length > 0 ? (
-          <div className="owasp-overview">
-            <strong>OWASP Top 10 Summary</strong>
-            <div className="owasp-overview-chips">
-              {owaspSummary.map((item) => (
-                <span key={item.key} className="owasp-chip">
-                  {item.label} ({item.count})
-                </span>
-              ))}
             </div>
-          </div>
-        ) : null}
-        {endpointSummary.length > 0 ? (
-          <details className="endpoint-overview">
-            <summary>Endpoint Priority</summary>
-            <div className="endpoint-overview-list">
-              {endpointSummary.slice(0, 8).map((item) => (
-                <div key={item.endpoint} className={`endpoint-card severity-${item.highestSeverity}`}>
-                  <span className="endpoint-title">{item.endpoint}</span>
-                  <span>Score: {item.score}</span>
-                  <span>Findings: {item.findings}</span>
-                  <span>Highest: {item.highestSeverityLabel}</span>
-                  <span>{item.topCategories.join(", ") || "No categories"}</span>
+
+            {activeSection === "capture" ? (
+              <form className="capture-form filter-bar" onSubmit={startCapture}>
+                <label className="field-label field-card">
+                  <span>URL:</span>
+                  <input
+                    type="text"
+                    placeholder="도메인 입력"
+                    value={domain}
+                    onChange={(event) => setDomain(event.target.value)}
+                  />
+                </label>
+                <label className="field-label field-card">
+                  <span>Excluded:</span>
+                  <input
+                    type="text"
+                    placeholder="추가 제외 패턴 입력"
+                    value={excludeInput}
+                    onChange={(event) => setExcludeInput(event.target.value)}
+                  />
+                </label>
+                <p className="field-hint">
+                  이미지 요청은 항상 제외됩니다. 여기에 입력하는 값은 추가 제외 패턴입니다.
+                </p>
+                <div className="action-row action-card">
+                  <button type="submit" disabled={submitting || active}>
+                    {submitting ? "처리 중..." : "캡처 시작"}
+                  </button>
+                  <button type="button" disabled={submitting || !active} onClick={stopCapture}>
+                    캡처 중지
+                  </button>
+                  <details className="export-menu">
+                    <summary className={visibleExchanges.length === 0 ? "disabled-summary" : ""}>
+                      Export
+                    </summary>
+                    <div className="export-menu-list">
+                      <button
+                        type="button"
+                        disabled={visibleExchanges.length === 0}
+                        onClick={downloadHtmlReport}
+                      >
+                        HTML 출력
+                      </button>
+                      <button
+                        type="button"
+                        disabled={visibleExchanges.length === 0}
+                        onClick={downloadPdfReport}
+                      >
+                        PDF 출력
+                      </button>
+                      <button
+                        type="button"
+                        disabled={visibleExchanges.length === 0}
+                        onClick={downloadJsonReport}
+                      >
+                        JSON 출력
+                      </button>
+                      <button
+                        type="button"
+                        disabled={visibleExchanges.length === 0}
+                        onClick={downloadMarkdownReport}
+                      >
+                        MD 출력
+                      </button>
+                      <button
+                        type="button"
+                        disabled={visibleExchanges.length === 0}
+                        onClick={downloadCsvReport}
+                      >
+                        CSV 출력
+                      </button>
+                    </div>
+                  </details>
+                  <button
+                    type="button"
+                    disabled={suppressedFindings.length + sessionSuppressedFindings.length === 0}
+                    onClick={clearSuppressedFindings}
+                  >
+                    오탐 초기화
+                  </button>
                 </div>
-              ))}
-            </div>
-          </details>
-        ) : null}
-      </section>
+              </form>
+            ) : (
+              <div className="section-intro">
+                <p className="eyebrow">Current Section</p>
+                <h2 className="section-title">
+                  {navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}
+                </h2>
+                <p className="section-copy">
+                  {navigationItems.find((item) => item.key === activeSection)?.description ||
+                    "필요한 보안/캡처 기능을 선택해 보세요."}
+                </p>
+              </div>
+            )}
 
-      <section className="pair-list">
-        <article className="panel">
-          <div className="entry-list">
-            {visibleExchanges
-              .slice()
-              .reverse()
-              .map((exchange) => {
-                const securityFindings = exchange.securityFindings || [];
+            {statusMessage ? <p className="status">{statusMessage}</p> : null}
+            {errors.length > 0 ? (
+              <div className="error-strip">{errors[errors.length - 1]?.errorText}</div>
+            ) : null}
+          </section>
 
-                return (
-                <article key={exchange.id} className="exchange-card">
+          {activeSection === "overview" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                {criticalAlerts.length > 0 ? (
+                  <div className="alert-banner critical-banner">
+                    Critical findings {criticalAlerts.length}건이 감지되었습니다. 우선 `URL 민감정보`,
+                    `응답 본문 비밀값`, `위험한 CORS`를 먼저 확인하는 것을 권장합니다.
+                  </div>
+                ) : null}
+                {criticalAlerts.length === 0 && highAlerts.length > 0 ? (
+                  <div className="alert-banner high-banner">
+                    High findings {highAlerts.length}건이 감지되었습니다. 엔드포인트 우선순위와 재현
+                    체크리스트를 따라 순서대로 검증해보면 됩니다.
+                  </div>
+                ) : null}
+                {owaspSummary.length > 0 ? (
+                  <div className="owasp-overview">
+                    <strong>OWASP Top 10 Summary</strong>
+                    <div className="owasp-overview-chips">
+                      {owaspSummary.map((item) => (
+                        <span key={item.key} className="owasp-chip">
+                          {item.label} ({item.count})
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="empty-state-card">아직 탐지된 보안 finding이 없습니다.</div>
+                )}
+                {endpointSummary.length > 0 ? (
+                  <div className="endpoint-overview" open="open">
+                    <strong>Endpoint Priority</strong>
+                    <div className="endpoint-overview-list">
+                      {endpointSummary.slice(0, 12).map((item) => (
+                        <div
+                          key={item.endpoint}
+                          className={`endpoint-card severity-${item.highestSeverity}`}
+                        >
+                          <span className="endpoint-title">{item.endpoint}</span>
+                          <span>Score: {item.score}</span>
+                          <span>Findings: {item.findings}</span>
+                          <span>Highest: {item.highestSeverityLabel}</span>
+                          <span>{item.topCategories.join(", ") || "No categories"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "har" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="har-panel section-panel">
+                  <strong>HAR Upload</strong>
+                  <div className="har-panel-grid">
+                    <div className="har-upload-box">
+                      <input
+                        type="file"
+                        accept=".har,application/json"
+                        onChange={(event) => setHarFile(event.target.files?.[0] || null)}
+                      />
+                      <button
+                        type="button"
+                        onClick={uploadHarFile}
+                        disabled={harUploading || !harFile}
+                      >
+                        {harUploading ? "업로드 중..." : "HAR 분석 업로드"}
+                      </button>
+                      {harUploadError ? <div className="error-strip">{harUploadError}</div> : null}
+                      {harUploadResult ? (
+                        <div className="har-result-card">
+                          <strong>{harUploadResult.fileName}</strong>
+                          <span>
+                            저장 상태:{" "}
+                            {harUploadResult.storage?.saved
+                              ? "Supabase 저장 완료"
+                              : harUploadResult.storage?.reason || "저장 안 됨"}
+                          </span>
+                          <span>총 요청: {harUploadResult.summary?.totalEntries ?? 0}</span>
+                          <span>평균 대기(ms): {harUploadResult.summary?.averageWaitMs ?? 0}</span>
+                          <span>
+                            가장 느린 URL: {harUploadResult.summary?.slowestEntry?.url || "-"}
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                    <div className="har-upload-box">
+                      <strong>최근 HAR 분석 결과</strong>
+                      <div className="recent-list">
+                        {recentHarAnalyses.length === 0 ? (
+                          <span className="empty-copy">
+                            {recentLoading ? "불러오는 중..." : "최근 HAR 분석 결과가 없습니다."}
+                          </span>
+                        ) : (
+                          recentHarAnalyses.map((item) => (
+                            <div key={item.id} className="recent-card">
+                              <strong>{item.file_name}</strong>
+                              <span>{formatDateTime(item.created_at)}</span>
+                              <span>총 요청: {item.total_entries}</span>
+                              <span>평균 대기(ms): {item.average_wait_ms}</span>
+                              <span>가장 느린 URL: {item.slowest_url || "-"}</span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "recent" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="stats-dashboard">
+                  {periodStats.map((item) => (
+                    <div key={item.key} className="stats-card">
+                      <strong>{item.label}</strong>
+                      <span>점검 {item.runCount}회</span>
+                      <span>요청 {item.totalExchanges}건</span>
+                      <span>Finding {item.totalFindings}건</span>
+                      <span>Critical {item.criticalFindings} / High {item.highFindings}</span>
+                    </div>
+                  ))}
+                </div>
+                <div className="recent-capture-panel section-panel">
+                  <strong>Recent Inspection Runs</strong>
+                  <div className="recent-list">
+                    {recentInspectionRuns.length === 0 ? (
+                      <span className="empty-copy">
+                        {recentLoading ? "불러오는 중..." : "최근 점검 이력이 없습니다."}
+                      </span>
+                    ) : (
+                      recentInspectionRuns.map((item) => (
+                        <div key={item.id} className="recent-card">
+                          <strong>{item.target_url || "-"}</strong>
+                          <span>
+                            점검 시간: {formatDateTime(item.started_at)} ~ {formatDateTime(item.ended_at)}
+                          </span>
+                          <span>세션: {item.capture_session_id || "-"}</span>
+                          <span>
+                            요청 {item.total_exchanges}건 / 에러 {item.total_errors}건 / Finding{" "}
+                            {item.total_findings}건
+                          </span>
+                          <span>
+                            Critical {item.critical_findings} / High {item.high_findings}
+                          </span>
+                          <div className="action-row">
+                            <button type="button" onClick={() => openInspectionRun(item)}>
+                              상세 보기
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                downloadHtmlReport(
+                                  item.report_snapshot && Object.keys(item.report_snapshot).length > 0
+                                    ? item.report_snapshot
+                                    : {
+                                        domain: item.target_url,
+                                        excluded: item.excluded_patterns || [],
+                                        securityOnly: item.security_only,
+                                        maskSensitive: item.mask_sensitive,
+                                        inspector: authUser?.email || "-",
+                                        exportedAt: item.ended_at || item.created_at,
+                                        conclusion: buildInspectionConclusion({
+                                          totalFindings: item.total_findings,
+                                          criticalFindings: item.critical_findings,
+                                          highFindings: item.high_findings,
+                                          totalErrors: item.total_errors
+                                        }),
+                                        owaspSummary: item.owasp_summary || [],
+                                        endpointSummary: item.endpoint_summary || [],
+                                        exchanges: []
+                                      }
+                                )
+                              }
+                            >
+                              HTML 재다운로드
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                downloadPdfReport(
+                                  item.report_snapshot && Object.keys(item.report_snapshot).length > 0
+                                    ? item.report_snapshot
+                                    : {
+                                        domain: item.target_url,
+                                        excluded: item.excluded_patterns || [],
+                                        securityOnly: item.security_only,
+                                        maskSensitive: item.mask_sensitive,
+                                        inspector: authUser?.email || "-",
+                                        exportedAt: item.ended_at || item.created_at,
+                                        conclusion: buildInspectionConclusion({
+                                          totalFindings: item.total_findings,
+                                          criticalFindings: item.critical_findings,
+                                          highFindings: item.high_findings,
+                                          totalErrors: item.total_errors
+                                        }),
+                                        owaspSummary: item.owasp_summary || [],
+                                        endpointSummary: item.endpoint_summary || [],
+                                        exchanges: []
+                                      }
+                                )
+                              }
+                            >
+                              PDF 재다운로드
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                  <strong>Recent Capture Events</strong>
+                  <div className="recent-list">
+                    {recentCaptureEvents.length === 0 ? (
+                      <span className="empty-copy">
+                        {recentLoading ? "불러오는 중..." : "최근 캡처 이벤트가 없습니다."}
+                      </span>
+                    ) : (
+                      recentCaptureEvents.map((item) => (
+                        <div key={item.id} className="recent-card">
+                          <strong>
+                            {item.request_method || "?"}{" "}
+                            {item.request_url || item.target_url || "-"}
+                          </strong>
+                          <span>{formatDateTime(item.created_at)}</span>
+                          <span>세션: {item.capture_session_id || "-"}</span>
+                          <span>상태: {item.response_status || item.error_text || "-"}</span>
+                          <span>타입: {item.request_resource_type || "-"}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "findings" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="entry-list findings-list">
+                  {findingEntries.length === 0 ? (
+                    <div className="empty-state-card">
+                      현재 조건에서 보여줄 보안 finding이 없습니다.
+                    </div>
+                  ) : (
+                    findingEntries.map(({ exchange, finding }, index) => (
+                      <article key={`${exchange.id}-${finding.key}-${index}`} className="finding-focus-card">
+                        <div className="finding-focus-head">
+                          <div>
+                            <strong>{finding.title}</strong>
+                            <span>
+                              {exchange.request?.method || "?"} {exchange.endpointKey}
+                            </span>
+                          </div>
+                          <span className={`severity-chip severity-chip-${finding.severity}`}>
+                            {finding.severityLabel}
+                          </span>
+                        </div>
+                        <div className="security-reason-list">
+                          <div className={`security-reason-item severity-${finding.severity}`}>
+                            <span className="security-reason-owasp">OWASP: {finding.owaspLabel}</span>
+                            <span className="security-reason-area">Area: {finding.area}</span>
+                            <span className="security-reason-description">
+                              Evidence: {maybeMask(finding.evidence, maskSensitive)}
+                            </span>
+                            <span className="security-reason-guide">Guide: {finding.guide}</span>
+                            <span className="security-reason-remediation">
+                              Remediation: {finding.remediation}
+                            </span>
+                            <span className="security-reason-confidence">
+                              Confidence: {finding.confidenceLabel}
+                            </span>
+                            <details className="security-poc">
+                              <summary>PoC Template</summary>
+                              <pre>{maybeMask(generateFindingPoc(finding, exchange), maskSensitive)}</pre>
+                            </details>
+                            <div className="security-reason-checklist">
+                              <strong>Reproduction Checklist</strong>
+                              <ul>
+                                {finding.checklist.map((item) => (
+                                  <li key={item}>{item}</li>
+                                ))}
+                              </ul>
+                            </div>
+                            <div className="finding-actions">
+                              <button type="button" onClick={() => injectPocIntoReplay(finding, exchange)}>
+                                PoC를 Replay에 주입
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => suppressFindingByScope("session", finding, exchange)}
+                              >
+                                세션 오탐
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => suppressFindingByScope("endpoint", finding, exchange)}
+                              >
+                                엔드포인트 오탐
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => suppressFindingByScope("host", finding, exchange)}
+                              >
+                                호스트 오탐
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => suppressFindingByScope("global", finding, exchange)}
+                              >
+                                전역 오탐
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      </article>
+                    ))
+                  )}
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "capture" ? (
+            <section className="pair-list">
+              <article className="panel">
+                <div className="entry-list">
+                  {visibleExchanges.length === 0 ? (
+                    <div className="empty-state-card">
+                      아직 캡처된 요청이 없습니다. URL을 입력하고 캡처를 시작해보세요.
+                    </div>
+                  ) : (
+                    visibleExchanges
+                      .slice()
+                      .reverse()
+                      .map((exchange) => {
+                        const securityFindings = exchange.securityFindings || [];
+
+                        return (
+                          <article key={exchange.id} className="exchange-card">
                   {securityFindings.length > 0 ? (
                     <div className="security-reason-bar">
                       <div className="security-reason-header">
@@ -2336,12 +3325,16 @@ export default function App() {
                       </details>
                     ) : null}
                   </div>
-                </article>
-                );
-              })}
-          </div>
-        </article>
-      </section>
+                          </article>
+                        );
+                      })
+                  )}
+                </div>
+              </article>
+            </section>
+          ) : null}
+        </div>
+      </div>
 
       <ReplayModal
         modalState={modalState}
@@ -2351,6 +3344,12 @@ export default function App() {
         replayError={replayError}
         onReplay={replayRequest}
         maskSensitive={maskSensitive}
+      />
+      <InspectionRunModal
+        run={inspectionModalRun}
+        onClose={() => setInspectionModalRun(null)}
+        onDownloadHtml={downloadHtmlReport}
+        onDownloadPdf={downloadPdfReport}
       />
     </main>
   );

@@ -10,6 +10,8 @@
 
 ## 핵심 기능
 
+- 구글 로그인 기반 접근 제어
+- 사이드 메뉴 기반 기능 분리(`Overview`, `Capture`, `Findings`, `HAR`, `Recent Data`)
 - 실시간 HTTP 요청/응답 캡처
 - 요청/응답 헤더 및 바디 확인
 - 특정 요청 재전송(Replay)
@@ -17,8 +19,8 @@
 - 보안 패턴 탐지 및 `OWASP Top 10` 기준 요약
 - 엔드포인트 우선순위 정리
 - `Before / After` 비교용 Diff
-- `HTML / JSON / Markdown / CSV` 리포트 출력
-- 분석 결과를 Supabase 테이블에 저장
+- `HTML / PDF / JSON / Markdown / CSV` 리포트 출력
+- HAR 분석 결과, 실시간 캡처 이벤트, 점검 이력을 Supabase에 저장
 
 ## 현재 UI에서 지원하는 보안 분석
 
@@ -57,6 +59,11 @@
 │  └─ rules.json
 ├─ server/
 │  └─ index.js
+├─ samples/
+│  ├─ sample.har
+│  ├─ sample-errors.har
+│  ├─ sample-security.har
+│  └─ sample-large.har
 ├─ src/
 │  ├─ App.jsx
 │  ├─ main.jsx
@@ -74,11 +81,13 @@
 - `proxy/modify_request.py`
   `mitmproxy` 애드온입니다. `proxy/rules.json` 규칙을 읽어서 요청 바디를 수정하고 응답을 출력합니다.
 - `server/index.js`
-  프론트 API 서버입니다. 캡처 상태 조회, 리플레이, HAR 분석, Supabase 저장을 처리합니다.
+  프론트 API 서버입니다. 캡처 상태 조회, 리플레이, HAR 분석, 캡처 이벤트 저장, 점검 이력 저장을 처리합니다.
 - `src/App.jsx`
-  메인 UI입니다. 실시간 요청 목록, 보안 finding, 리포트 출력, Diff, PoC 주입 등을 담당합니다.
+  메인 UI입니다. 로그인, 사이드 메뉴, 실시간 요청 목록, 보안 finding, 리포트 출력, Diff, PoC 주입, 최근 이력 화면 등을 담당합니다.
 - `supabase/migrations/`
   원격 프로젝트에 적용할 테이블 마이그레이션 파일이 들어갑니다.
+- `samples/`
+  HAR 업로드 테스트용 샘플 파일입니다.
 
 ## 요구 사항
 
@@ -158,13 +167,28 @@ npm run dev
 
 ## 일반적인 사용 흐름
 
+### 로그인
+
+1. 프런트 접속 후 구글 로그인 버튼을 누릅니다.
+2. 현재 허용된 계정으로 로그인해야 메인 화면에 들어갈 수 있습니다.
+
+현재 허용 계정:
+
+- `totoriverce@gmail.com`
+
+참고:
+
+- 로그인 정보는 브라우저 `localStorage`에 저장됩니다.
+- 이름 표시가 깨졌다면 로그아웃 후 다시 로그인하면 최신 디코딩 값으로 갱신됩니다.
+
 ### 실시간 캡처
 
 1. 브라우저 또는 테스트 클라이언트의 프록시를 `127.0.0.1:8080`으로 설정합니다.
-2. 프런트에서 분석 대상 URL을 입력합니다.
+2. `Capture` 화면에서 분석 대상 URL을 입력합니다.
 3. 필요하면 추가 제외 패턴을 입력합니다.
 4. `캡처 시작`을 누릅니다.
 5. 요청/응답 목록을 보면서 finding과 Diff를 확인합니다.
+6. 캡처를 종료하면 세션 요약이 점검 이력으로 저장됩니다.
 
 참고:
 
@@ -183,7 +207,7 @@ npm run dev
 
 ### HAR 분석
 
-HAR 업로드는 서버가 파일을 읽어 아래 항목을 계산합니다.
+`HAR` 화면에서 파일을 선택해 업로드할 수 있습니다. 서버는 아래 항목을 계산합니다.
 
 - 총 요청 수
 - 평균 대기 시간
@@ -196,11 +220,23 @@ HAR 업로드는 서버가 파일을 읽어 아래 항목을 계산합니다.
 
 분석 자체는 Supabase 없이도 가능하지만, 결과를 DB에 저장하려면 Supabase 서버 키가 필요합니다.
 
+### Recent Data
+
+`Recent Data` 화면에서는 아래 내용을 확인할 수 있습니다.
+
+- 최근 점검 이력
+- 최근 캡처 이벤트
+- 최근 7일 / 30일 기준 통계 대시보드
+- 점검 이력 상세 모달
+- 점검 이력별 `HTML / PDF` 리포트 재다운로드
+
 ## Supabase 연동
 
 ### 저장 대상 테이블
 
-이 프로젝트는 아래 테이블에 HAR 분석 결과를 저장합니다.
+이 프로젝트는 아래 테이블을 사용합니다.
+
+#### 1. HAR 분석 결과
 
 ```sql
 create table if not exists public.capture_har_analyses (
@@ -216,6 +252,54 @@ create table if not exists public.capture_har_analyses (
   status_codes jsonb not null default '{}'::jsonb,
   content_types jsonb not null default '[]'::jsonb,
   failed_requests jsonb not null default '[]'::jsonb
+);
+```
+
+#### 2. 실시간 캡처 이벤트
+
+```sql
+create table if not exists public.capture_http_events (
+  id bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  capture_session_id uuid,
+  target_url text,
+  request_timestamp timestamptz,
+  request_method text,
+  request_url text,
+  request_resource_type text,
+  request_headers jsonb not null default '{}'::jsonb,
+  request_body text not null default '',
+  response_timestamp timestamptz,
+  response_url text,
+  response_status integer,
+  response_status_text text,
+  response_headers jsonb not null default '{}'::jsonb,
+  response_body_preview text not null default '',
+  error_text text
+);
+```
+
+#### 3. 점검 이력
+
+```sql
+create table if not exists public.capture_inspection_runs (
+  id bigint generated always as identity primary key,
+  created_at timestamptz not null default now(),
+  capture_session_id uuid,
+  target_url text not null,
+  started_at timestamptz,
+  ended_at timestamptz not null default now(),
+  total_exchanges integer not null default 0,
+  total_errors integer not null default 0,
+  total_findings integer not null default 0,
+  critical_findings integer not null default 0,
+  high_findings integer not null default 0,
+  security_only boolean not null default false,
+  mask_sensitive boolean not null default true,
+  excluded_patterns jsonb not null default '[]'::jsonb,
+  owasp_summary jsonb not null default '[]'::jsonb,
+  endpoint_summary jsonb not null default '[]'::jsonb,
+  report_snapshot jsonb not null default '{}'::jsonb
 );
 ```
 
@@ -237,26 +321,53 @@ create table if not exists public.capture_har_analyses (
 이 저장소에는 Supabase 마이그레이션 파일이 포함되어 있습니다.
 
 - [supabase/migrations/20260417230435_create_capture_har_analyses.sql](/Users/mac/Tools/HttpViewer/supabase/migrations/20260417230435_create_capture_har_analyses.sql)
+- [supabase/migrations/20260417233000_create_capture_http_events.sql](/Users/mac/Tools/HttpViewer/supabase/migrations/20260417233000_create_capture_http_events.sql)
+- [supabase/migrations/20260417235500_create_capture_inspection_runs.sql](/Users/mac/Tools/HttpViewer/supabase/migrations/20260417235500_create_capture_inspection_runs.sql)
 
 원격 프로젝트에 이미 다른 migration history가 있다면, `supabase db push` 전에 기존 이력과 로컬 이력을 맞춰야 할 수 있습니다. 그런 경우엔 SQL Editor에서 테이블을 직접 생성하는 방식이 더 안전할 수 있습니다.
+
+점검 이력 테이블에 `report_snapshot` 컬럼이 없다면 아래 SQL을 추가로 실행하면 됩니다.
+
+```sql
+alter table public.capture_inspection_runs
+add column if not exists report_snapshot jsonb not null default '{}'::jsonb;
+```
 
 ## 리포트 출력
 
 상단 `Export` 메뉴에서 다음 포맷을 출력할 수 있습니다.
 
 - HTML
+- PDF
 - JSON
 - Markdown
 - CSV
 
 리포트에는 다음 정보가 포함됩니다.
 
+- 표지
+- 점검자
+- 점검 일시
+- 결론
 - 요청/응답 목록
 - 보안 finding
 - OWASP 요약
 - 엔드포인트 위험도 요약
 
 `Mask Secrets`가 켜져 있으면 민감정보는 마스킹된 상태로 출력됩니다.
+
+## 샘플 HAR 파일
+
+테스트용 HAR 파일은 [samples](/Users/mac/Tools/HttpViewer/samples)에 들어 있습니다.
+
+- [samples/sample.har](/Users/mac/Tools/HttpViewer/samples/sample.har)
+  기본 업로드/저장 동작 확인용
+- [samples/sample-errors.har](/Users/mac/Tools/HttpViewer/samples/sample-errors.har)
+  오류 응답과 실패 요청 확인용
+- [samples/sample-security.har](/Users/mac/Tools/HttpViewer/samples/sample-security.har)
+  보안 패턴 탐지 확인용
+- [samples/sample-large.har](/Users/mac/Tools/HttpViewer/samples/sample-large.har)
+  대량 요청 흐름 확인용
 
 ## UI 보조 기능
 

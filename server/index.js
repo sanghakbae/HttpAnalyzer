@@ -1,4 +1,5 @@
 import cors from "cors";
+import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import express from "express";
 import fs from "fs/promises";
@@ -35,6 +36,7 @@ const captureState = {
   context: null,
   page: null,
   startedAt: null,
+  sessionId: null,
   targetUrl: null,
   excludePatterns: [],
   exchanges: [],
@@ -81,6 +83,7 @@ async function closeCaptureBrowser() {
   captureState.context = null;
   captureState.page = null;
   captureState.startedAt = null;
+  captureState.sessionId = null;
   captureState.targetUrl = null;
   captureState.excludePatterns = [];
 }
@@ -105,6 +108,102 @@ function filterReplayHeaders(headers) {
   );
 }
 
+async function saveAnalysisRecord(payload) {
+  if (!supabase) {
+    return { saved: false, reason: "Supabase credentials are not configured." };
+  }
+
+  const { error } = await supabase.from("capture_har_analyses").insert(payload);
+
+  if (error) {
+    return { saved: false, reason: error.message };
+  }
+
+  return { saved: true };
+}
+
+async function saveCaptureRecord(payload) {
+  if (!supabase) {
+    return { saved: false, reason: "Supabase credentials are not configured." };
+  }
+
+  const { error } = await supabase.from("capture_http_events").insert(payload);
+
+  if (error) {
+    return { saved: false, reason: error.message };
+  }
+
+  return { saved: true };
+}
+
+async function saveInspectionRun(payload) {
+  if (!supabase) {
+    return { saved: false, reason: "Supabase credentials are not configured." };
+  }
+
+  const { error } = await supabase.from("capture_inspection_runs").insert(payload);
+
+  if (error) {
+    return { saved: false, reason: error.message };
+  }
+
+  return { saved: true };
+}
+
+async function loadRecentHarAnalyses(limit = 10) {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("capture_har_analyses")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+async function loadRecentCaptureEvents(limit = 20) {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("capture_http_events")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
+async function loadRecentInspectionRuns(limit = 15) {
+  if (!supabase) {
+    return [];
+  }
+
+  const { data, error } = await supabase
+    .from("capture_inspection_runs")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw error;
+  }
+
+  return data || [];
+}
+
 function attachCaptureListeners(page, targetHost) {
   const exchangeMap = new Map();
 
@@ -126,6 +225,7 @@ function attachCaptureListeners(page, targetHost) {
     const entry = {
       id,
       timestamp: new Date().toISOString(),
+      persisted: false,
       request: {
         method: request.method(),
         url,
@@ -178,6 +278,26 @@ function attachCaptureListeners(page, targetHost) {
 
     if (pairedEntry) {
       pairedEntry.response = responsePayload;
+      if (!pairedEntry.persisted) {
+        pairedEntry.persisted = true;
+        void saveCaptureRecord({
+          capture_session_id: captureState.sessionId,
+          target_url: captureState.targetUrl,
+          request_timestamp: pairedEntry.timestamp,
+          request_method: pairedEntry.request?.method ?? null,
+          request_url: pairedEntry.request?.url ?? null,
+          request_resource_type: pairedEntry.request?.resourceType ?? null,
+          request_headers: pairedEntry.request?.headers ?? {},
+          request_body: pairedEntry.request?.postData ?? "",
+          response_timestamp: responsePayload.timestamp,
+          response_url: responsePayload.url,
+          response_status: responsePayload.status,
+          response_status_text: responsePayload.statusText,
+          response_headers: responsePayload.headers,
+          response_body_preview: responsePayload.bodyPreview,
+          error_text: null
+        }).catch(() => {});
+      }
       return;
     }
 
@@ -200,14 +320,34 @@ function attachCaptureListeners(page, targetHost) {
       return;
     }
 
-    captureState.errors.push({
+    const failedEntry = {
       id: url + "-" + Date.now(),
       timestamp: new Date().toISOString(),
       url,
       method: request.method(),
       errorText: request.failure()?.errorText || "Unknown error"
-    });
+    };
+
+    captureState.errors.push(failedEntry);
     trimCollection(captureState.errors, 100);
+
+    void saveCaptureRecord({
+      capture_session_id: captureState.sessionId,
+      target_url: captureState.targetUrl,
+      request_timestamp: failedEntry.timestamp,
+      request_method: failedEntry.method,
+      request_url: failedEntry.url,
+      request_resource_type: request.resourceType(),
+      request_headers: sanitizeHeaders(request.headers()),
+      request_body: request.postData() || "",
+      response_timestamp: null,
+      response_url: null,
+      response_status: null,
+      response_status_text: null,
+      response_headers: {},
+      response_body_preview: "",
+      error_text: failedEntry.errorText
+    }).catch(() => {});
   });
 }
 
@@ -251,6 +391,7 @@ async function launchCaptureSession(domain, excludePatterns = []) {
   captureState.context = context;
   captureState.page = page;
   captureState.startedAt = new Date().toISOString();
+  captureState.sessionId = randomUUID();
   captureState.targetUrl = targetUrl;
   captureState.excludePatterns = excludePatterns;
 }
@@ -355,20 +496,6 @@ async function writeProxyRules(rules) {
   await fs.writeFile(proxyRulesPath, payload, "utf-8");
 }
 
-async function saveAnalysisRecord(payload) {
-  if (!supabase) {
-    return { saved: false, reason: "Supabase credentials are not configured." };
-  }
-
-  const { error } = await supabase.from("capture_har_analyses").insert(payload);
-
-  if (error) {
-    return { saved: false, reason: error.message };
-  }
-
-  return { saved: true };
-}
-
 app.get("/api/health", (_request, response) => {
   response.json({ ok: true });
 });
@@ -377,6 +504,7 @@ app.get("/api/capture/status", (_request, response) => {
   response.json({
     active: Boolean(captureState.page),
     startedAt: captureState.startedAt,
+    sessionId: captureState.sessionId,
     targetUrl: captureState.targetUrl,
     excludePatterns: captureState.excludePatterns,
     exchanges: captureState.exchanges,
@@ -394,6 +522,7 @@ app.post("/api/capture/start", async (request, response) => {
     );
     response.json({
       ok: true,
+      sessionId: captureState.sessionId,
       targetUrl: captureState.targetUrl,
       startedAt: captureState.startedAt,
       excludePatterns: captureState.excludePatterns
@@ -408,6 +537,49 @@ app.post("/api/capture/start", async (request, response) => {
 app.post("/api/capture/stop", async (_request, response) => {
   await closeCaptureBrowser();
   response.json({ ok: true });
+});
+
+app.post("/api/inspection-runs", async (request, response) => {
+  const payload = request.body ?? {};
+
+  if (!payload.target_url) {
+    response.status(400).json({ error: "target_url is required." });
+    return;
+  }
+
+  try {
+    const saved = await saveInspectionRun({
+      capture_session_id: payload.capture_session_id ?? null,
+      target_url: payload.target_url,
+      started_at: payload.started_at ?? null,
+      ended_at: payload.ended_at ?? new Date().toISOString(),
+      total_exchanges: Number(payload.total_exchanges ?? 0),
+      total_errors: Number(payload.total_errors ?? 0),
+      total_findings: Number(payload.total_findings ?? 0),
+      critical_findings: Number(payload.critical_findings ?? 0),
+      high_findings: Number(payload.high_findings ?? 0),
+      security_only: Boolean(payload.security_only),
+      mask_sensitive: Boolean(payload.mask_sensitive),
+      excluded_patterns: Array.isArray(payload.excluded_patterns) ? payload.excluded_patterns : [],
+      owasp_summary: Array.isArray(payload.owasp_summary) ? payload.owasp_summary : [],
+      endpoint_summary: Array.isArray(payload.endpoint_summary) ? payload.endpoint_summary : [],
+      report_snapshot:
+        payload.report_snapshot && typeof payload.report_snapshot === "object"
+          ? payload.report_snapshot
+          : {}
+    });
+
+    if (!saved.saved) {
+      response.status(400).json(saved);
+      return;
+    }
+
+    response.json(saved);
+  } catch (error) {
+    response.status(400).json({
+      error: error instanceof Error ? error.message : "Failed to save inspection run"
+    });
+  }
 });
 
 app.post("/api/replay-request", async (request, response) => {
@@ -510,6 +682,26 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
     response.status(400).json({
       error: "Invalid HAR file.",
       message: error instanceof Error ? error.message : "Unknown error"
+    });
+  }
+});
+
+app.get("/api/recent-analyses", async (_request, response) => {
+  try {
+    const [harAnalyses, captureEvents, inspectionRuns] = await Promise.all([
+      loadRecentHarAnalyses(10),
+      loadRecentCaptureEvents(20),
+      loadRecentInspectionRuns(15)
+    ]);
+
+    response.json({
+      harAnalyses,
+      captureEvents,
+      inspectionRuns
+    });
+  } catch (error) {
+    response.status(500).json({
+      error: error instanceof Error ? error.message : "Failed to load recent analyses"
     });
   }
 });
