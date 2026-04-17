@@ -1,0 +1,2 @@
+mitmproxy==9.0.1
+bcrypt<4

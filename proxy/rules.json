@@ -1,0 +1,19 @@
+{
+  "rules": [
+    {
+      "id": "example-rule",
+      "enabled": true,
+      "host": "example.com",
+      "pathPrefix": "/api",
+      "matchContentType": "application/json",
+      "inject": {
+        "intercepted": true,
+        "source": "mitmproxy-addon"
+      },
+      "appendToField": {
+        "field": "message",
+        "suffix": " [modified]"
+      }
+    }
+  ]
+}
