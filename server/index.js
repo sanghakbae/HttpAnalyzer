@@ -360,7 +360,7 @@ async function saveAnalysisRecord(payload) {
     return { saved: false, reason: "Supabase credentials are not configured." };
   }
 
-  const { error } = await supabase.from("har_analyses").insert(payload);
+  const { error } = await supabase.from("capture_har_analyses").insert(payload);
 
   if (error) {
     return { saved: false, reason: error.message };
