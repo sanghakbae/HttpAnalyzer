@@ -1,10 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
 const GOOGLE_CLIENT_ID =
   "924920443826-k59m97pgabmdb42qv9cq63plmuuvvn7s.apps.googleusercontent.com";
 const AUTH_STORAGE_KEY = "http-analyzer-auth-user";
 const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
+const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
+const LOCAL_INSPECTION_RUNS_KEY = "http-analyzer-local-inspection-runs";
+const LOCAL_CAPTURE_EVENTS_KEY = "http-analyzer-local-capture-events";
+const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const TOKEN_REGEX = new RegExp(
   `("(?:\\\\.|[^"])*":)|("(?:\\\\.|[^"])*")|('(?:\\\\.|[^'])*')|(<!--.*?-->)|(<!DOCTYPE[^>]*>)|(</?[\\w:-]+[^>]*>)|\\b\\d+(?:\\.\\d+)?\\b|\\btrue\\b|\\bfalse\\b|\\bnull\\b|[{}\\[\\](),:]`,
   "g"
@@ -80,6 +84,138 @@ function prettyJson(value) {
     return JSON.stringify(value, null, 2);
   } catch {
     return String(value);
+  }
+}
+
+function sanitizeMermaidText(value) {
+  return String(value || "")
+    .replace(/"/g, '\\"')
+    .replace(/\n+/g, " ")
+    .trim();
+}
+
+function buildCaptureMermaid(exchanges) {
+  if (!Array.isArray(exchanges) || exchanges.length === 0) {
+    return 'flowchart LR\n  A["No Capture Data"]';
+  }
+
+  const rootUrl = exchanges[0]?.request?.url || "";
+  let rootHost = "Captured Site";
+
+  try {
+    rootHost = new URL(rootUrl).hostname || rootHost;
+  } catch {
+    rootHost = "Captured Site";
+  }
+
+  const lines = ['flowchart LR', `  site["${sanitizeMermaidText(rootHost)}"]`];
+  const seenHosts = new Set();
+  const seenEndpoints = new Set();
+
+  exchanges.slice(0, 24).forEach((exchange, index) => {
+    const requestUrl = exchange?.request?.url || "";
+    const method = exchange?.request?.method || "GET";
+    const endpointLabel = `${method} ${exchange?.endpointKey || requestUrl || `Request ${index + 1}`}`;
+    let host = rootHost;
+
+    try {
+      host = new URL(requestUrl).hostname || rootHost;
+    } catch {
+      host = rootHost;
+    }
+
+    const hostId = `host${index}`;
+    const endpointId = `endpoint${index}`;
+
+    if (!seenHosts.has(host)) {
+      lines.push(`  ${hostId}["${sanitizeMermaidText(host)}"]`);
+      lines.push(`  site --> ${hostId}`);
+      seenHosts.add(host);
+    } else {
+      const existingHostIndex = exchanges
+        .slice(0, index)
+        .findIndex((item) => {
+          try {
+            return new URL(item?.request?.url || "").hostname === host;
+          } catch {
+            return false;
+          }
+        });
+
+      if (existingHostIndex >= 0) {
+        lines.push(`  host${existingHostIndex} --> ${endpointId}`);
+        seenEndpoints.add(endpointLabel);
+        lines.push(`  ${endpointId}["${sanitizeMermaidText(endpointLabel)}"]`);
+        return;
+      }
+    }
+
+    lines.push(`  ${endpointId}["${sanitizeMermaidText(endpointLabel)}"]`);
+    lines.push(`  ${hostId} --> ${endpointId}`);
+    seenEndpoints.add(endpointLabel);
+  });
+
+  return lines.join("\n");
+}
+
+function isAbortedErrorText(value) {
+  return ABORTED_ERROR_REGEX.test(String(value || ""));
+}
+
+function NavigationIcon({ name }) {
+  const commonProps = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": "true"
+  };
+
+  switch (name) {
+    case "overview":
+      return (
+        <svg {...commonProps}>
+          <rect x="3" y="4" width="7" height="7" rx="1.5" />
+          <rect x="14" y="4" width="7" height="5" rx="1.5" />
+          <rect x="14" y="12" width="7" height="8" rx="1.5" />
+          <rect x="3" y="14" width="7" height="6" rx="1.5" />
+        </svg>
+      );
+    case "capture":
+      return (
+        <svg {...commonProps}>
+          <path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z" />
+          <path d="M12 11.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z" />
+          <path d="M8.5 9.5h.01M15.5 9.5h.01" />
+        </svg>
+      );
+    case "findings":
+      return (
+        <svg {...commonProps}>
+          <path d="M12 3 4 7v5c0 5 3.4 7.8 8 9 4.6-1.2 8-4 8-9V7z" />
+          <path d="M12 8v5" />
+          <path d="M12 16h.01" />
+        </svg>
+      );
+    case "har":
+      return (
+        <svg {...commonProps}>
+          <path d="M8 3h6l5 5v11a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" />
+          <path d="M14 3v5h5" />
+          <path d="M9 13h6M9 17h6" />
+        </svg>
+      );
+    case "recent":
+      return (
+        <svg {...commonProps}>
+          <circle cx="12" cy="12" r="8" />
+          <path d="M12 7v5l3 2" />
+        </svg>
+      );
+    default:
+      return null;
   }
 }
 
@@ -603,6 +739,71 @@ function generateFindingPoc(finding, exchange) {
     `Headers: ${headers || "{}"}`,
     `Body/Payload: ${payload || "(none)"}`
   ].join("\n");
+}
+
+function analyzeHarLocally(har) {
+  const entries = har?.log?.entries ?? [];
+  const methods = {};
+  const hosts = new Map();
+  const statusCodes = {};
+  const contentTypes = {};
+  const slowestEntries = [];
+  const largestResponses = [];
+  const failedRequests = [];
+
+  let totalWait = 0;
+  let slowestEntry = null;
+
+  for (const entry of entries) {
+    const method = entry?.request?.method ?? "UNKNOWN";
+    const url = entry?.request?.url ?? "";
+    const time = Number(entry?.time ?? 0);
+    const status = entry?.response?.status ?? 0;
+    const responseSize = Number(entry?.response?.bodySize ?? 0);
+    const mimeType = entry?.response?.content?.mimeType ?? "unknown";
+
+    methods[method] = (methods[method] ?? 0) + 1;
+    statusCodes[status] = (statusCodes[status] ?? 0) + 1;
+    contentTypes[mimeType] = (contentTypes[mimeType] ?? 0) + 1;
+    totalWait += time;
+
+    try {
+      const { host } = new URL(url);
+      hosts.set(host, (hosts.get(host) ?? 0) + 1);
+    } catch {
+      hosts.set("invalid-url", (hosts.get("invalid-url") ?? 0) + 1);
+    }
+
+    if (!slowestEntry || time > slowestEntry.time) {
+      slowestEntry = { time, url, method, status };
+    }
+
+    slowestEntries.push({ method, status, time, url });
+    largestResponses.push({ method, status, size: responseSize, url });
+
+    if (status >= 400) {
+      failedRequests.push({ method, status, time, url });
+    }
+  }
+
+  return {
+    totalEntries: entries.length,
+    averageWaitMs: entries.length ? Number((totalWait / entries.length).toFixed(2)) : 0,
+    slowestEntry,
+    slowestEntries: slowestEntries.sort((a, b) => b.time - a.time).slice(0, 5),
+    largestResponses: largestResponses.sort((a, b) => b.size - a.size).slice(0, 5),
+    failedRequests: failedRequests.sort((a, b) => b.time - a.time).slice(0, 10),
+    methods,
+    statusCodes,
+    contentTypes: Object.entries(contentTypes)
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10),
+    topHosts: [...hosts.entries()]
+      .map(([host, count]) => ({ host, count }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 5)
+  };
 }
 
 function analyzeSecurityFindings(exchange) {
@@ -1444,6 +1645,31 @@ function getStoredAuthUser() {
   return user.email ? user : null;
 }
 
+function getStoredHarHistory() {
+  const items = getStoredJson(LOCAL_HAR_HISTORY_KEY, []);
+  return Array.isArray(items) ? items : [];
+}
+
+function getStoredInspectionRuns() {
+  const items = getStoredJson(LOCAL_INSPECTION_RUNS_KEY, []);
+  return Array.isArray(items) ? items : [];
+}
+
+function getStoredCaptureEvents() {
+  const items = getStoredJson(LOCAL_CAPTURE_EVENTS_KEY, []);
+  return Array.isArray(items) ? items : [];
+}
+
+function buildHarHistoryFingerprint({ fileName, fileSize, summary }) {
+  return [
+    fileName || "",
+    String(fileSize || ""),
+    String(summary?.totalEntries || 0),
+    String(summary?.averageWaitMs || 0),
+    summary?.slowestEntry?.url || ""
+  ].join("::");
+}
+
 async function readJsonSafely(response) {
   const rawText = await response.text();
 
@@ -1462,6 +1688,7 @@ async function readJsonSafely(response) {
 
 function LoginScreen({ onLogin }) {
   const [loginError, setLoginError] = useState("");
+  const loginShellRef = useRef(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1546,7 +1773,7 @@ function LoginScreen({ onLogin }) {
   }, [onLogin]);
 
   return (
-    <main className="login-shell">
+    <main ref={loginShellRef} className="login-shell">
       <section className="login-card">
         <p className="login-eyebrow">Google Sign-In</p>
         <h1 className="page-title">HTTP Analyzer Login</h1>
@@ -1729,8 +1956,32 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
   );
 }
 
+function MermaidModal({ code, onClose, onCopy }) {
+  if (!code) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-shell mermaid-modal-shell" onClick={(event) => event.stopPropagation()}>
+        <div className="mermaid-modal-header">
+          <div />
+          <button type="button" onClick={onCopy}>
+            복사
+          </button>
+        </div>
+        <pre className="mermaid-modal-code">{code}</pre>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  const appShellRef = useRef(null);
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(
+    () => getStoredValue("http-analyzer-sidebar-collapsed") === "true"
+  );
   const [activeSection, setActiveSection] = useState(() =>
     getStoredValue("http-analyzer-active-section", "overview")
   );
@@ -1782,10 +2033,80 @@ export default function App() {
   const [harUploading, setHarUploading] = useState(false);
   const [harUploadResult, setHarUploadResult] = useState(null);
   const [harUploadError, setHarUploadError] = useState("");
+  const [localHarHistory, setLocalHarHistory] = useState(() => getStoredHarHistory());
+  const [localInspectionRuns, setLocalInspectionRuns] = useState(() => getStoredInspectionRuns());
+  const [localCaptureEvents, setLocalCaptureEvents] = useState(() => getStoredCaptureEvents());
+  const [selectedHarHistoryKey, setSelectedHarHistoryKey] = useState("");
   const [recentHarAnalyses, setRecentHarAnalyses] = useState([]);
   const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
   const [recentInspectionRuns, setRecentInspectionRuns] = useState([]);
   const [recentLoading, setRecentLoading] = useState(false);
+  const [captureMermaidModal, setCaptureMermaidModal] = useState("");
+  const [focusedFindingExchangeId, setFocusedFindingExchangeId] = useState("");
+  const mergedHarHistory = [
+    ...localHarHistory.map((item) => ({ ...item, historySource: "local" })),
+    ...recentHarAnalyses
+      .map((item) => ({
+        ...item,
+        historySource: "db",
+        fingerprint:
+          item.fingerprint ||
+          buildHarHistoryFingerprint({
+            fileName: item.file_name,
+            fileSize: item.file_size,
+            summary: {
+              totalEntries: item.total_entries,
+              averageWaitMs: item.average_wait_ms,
+              slowestEntry: { url: item.slowest_url }
+            }
+          })
+      }))
+      .filter(
+        (item) => !localHarHistory.some((localItem) => localItem.fingerprint === item.fingerprint)
+      )
+  ];
+  const mergedInspectionRuns = [
+    ...localInspectionRuns.map((item) => ({ ...item, historySource: "local" })),
+    ...recentInspectionRuns
+      .map((item) => ({ ...item, historySource: "db" }))
+      .filter(
+        (item) =>
+          !localInspectionRuns.some(
+            (localItem) =>
+              (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
+              (localItem.target_url || "") === (item.target_url || "") &&
+              (localItem.ended_at || "") === (item.ended_at || "")
+          )
+      )
+  ];
+  const mergedCaptureEvents = [
+    ...localCaptureEvents.map((item) => ({ ...item, historySource: "local" })),
+    ...recentCaptureEvents
+      .map((item) => ({ ...item, historySource: "db" }))
+      .filter(
+        (item) =>
+          !localCaptureEvents.some(
+            (localItem) =>
+              (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
+              (localItem.request_url || "") === (item.request_url || "") &&
+              (localItem.created_at || "") === (item.created_at || "")
+          )
+      )
+  ].filter((item) => !isAbortedErrorText(item.error_text));
+  const normalizedHarHistory = mergedHarHistory.map((item) => ({
+    ...item,
+    historyKey: `${item.historySource}:${item.id || item.fingerprint || item.created_at || item.file_name}`,
+    displayFileName: item.file_name || item.fileName || "-",
+    displayCreatedAt: item.created_at || item.createdAt || "",
+    summary:
+      item.summary || {
+        totalEntries: item.total_entries ?? 0,
+        averageWaitMs: item.average_wait_ms ?? 0,
+        slowestEntry: { url: item.slowest_url || "-" }
+      }
+  }));
+  const selectedHarHistory =
+    normalizedHarHistory.find((item) => item.historyKey === selectedHarHistoryKey) || null;
 
   const liveExcludePatterns = getCombinedExcludePatterns(excludeInput);
 
@@ -1804,7 +2125,7 @@ export default function App() {
   const endpointSummary = summarizeEndpoints(analyzedExchanges);
   const criticalAlerts = allSecurityFindings.filter((finding) => finding.severity === "critical");
   const highAlerts = allSecurityFindings.filter((finding) => finding.severity === "high");
-  const periodStats = buildPeriodStats(recentInspectionRuns);
+  const periodStats = buildPeriodStats(mergedInspectionRuns);
 
   const exchangesWithDiffs = analyzedExchanges.map((exchange, index) => {
     const previous = analyzedExchanges
@@ -1836,6 +2157,7 @@ export default function App() {
         (responseUrl && responseUrl.includes(pattern))
     );
   });
+  const visibleErrors = errors.filter((item) => !isAbortedErrorText(item?.errorText));
 
   useEffect(() => {
     if (authUser) {
@@ -1858,7 +2180,7 @@ export default function App() {
         setCaptureSessionId(data.sessionId || "");
         setCaptureStartedAt(data.startedAt || "");
         setExchanges(data.exchanges || []);
-        setErrors(data.errors || []);
+        setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
 
         const persistedDomain = getStoredValue("http-analyzer-domain");
         const persistedExcludeInput = getStoredValue("http-analyzer-exclude-patterns");
@@ -1910,6 +2232,87 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const syncLocalQueue = async () => {
+      const pendingRuns = localInspectionRuns.filter((item) => item.pending_sync);
+      const pendingEvents = localCaptureEvents.filter((item) => item.pending_sync);
+
+      if (pendingRuns.length === 0 && pendingEvents.length === 0) {
+        return;
+      }
+
+      try {
+        for (const run of pendingRuns) {
+          const response = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              capture_session_id: run.capture_session_id ?? null,
+              target_url: run.target_url,
+              started_at: run.started_at ?? null,
+              ended_at: run.ended_at ?? null,
+              total_exchanges: run.total_exchanges ?? 0,
+              total_errors: run.total_errors ?? 0,
+              total_findings: run.total_findings ?? 0,
+              critical_findings: run.critical_findings ?? 0,
+              high_findings: run.high_findings ?? 0,
+              security_only: Boolean(run.security_only),
+              mask_sensitive: Boolean(run.mask_sensitive),
+              excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
+              owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
+              endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
+              report_snapshot:
+                run.report_snapshot && typeof run.report_snapshot === "object"
+                  ? run.report_snapshot
+                  : {}
+            })
+          });
+
+          if (response.ok) {
+            setLocalInspectionRuns((current) => current.filter((item) => item.id !== run.id));
+          }
+        }
+
+        if (pendingEvents.length > 0) {
+          const response = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              events: pendingEvents.map((item) => ({
+                capture_session_id: item.capture_session_id ?? null,
+                target_url: item.target_url ?? null,
+                request_timestamp: item.request_timestamp ?? item.created_at ?? null,
+                request_method: item.request_method ?? null,
+                request_url: item.request_url ?? null,
+                request_resource_type: item.request_resource_type ?? null,
+                request_headers: item.request_headers ?? {},
+                request_body: item.request_body ?? "",
+                response_timestamp: item.response_timestamp ?? null,
+                response_url: item.response_url ?? null,
+                response_status: item.response_status ?? null,
+                response_status_text: item.response_status_text ?? null,
+                response_headers: item.response_headers ?? {},
+                response_body_preview: item.response_body_preview ?? "",
+                error_text: item.error_text ?? null
+              }))
+            })
+          });
+
+          if (response.ok) {
+            const syncedIds = new Set(pendingEvents.map((item) => item.id));
+            setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
+          }
+        }
+      } catch {
+        return;
+      }
+    };
+
+    syncLocalQueue();
+    const timer = window.setInterval(syncLocalQueue, 15000);
+    return () => window.clearInterval(timer);
+  }, [localInspectionRuns, localCaptureEvents]);
+
+  useEffect(() => {
     setStoredValue("http-analyzer-domain", domain);
   }, [domain]);
 
@@ -1928,6 +2331,33 @@ export default function App() {
   useEffect(() => {
     setStoredValue("http-analyzer-active-section", activeSection);
   }, [activeSection]);
+
+  useEffect(() => {
+    setStoredValue("http-analyzer-sidebar-collapsed", String(sidebarCollapsed));
+  }, [sidebarCollapsed]);
+
+  useEffect(() => {
+    setStoredValue(LOCAL_INSPECTION_RUNS_KEY, JSON.stringify(localInspectionRuns));
+  }, [localInspectionRuns]);
+
+  useEffect(() => {
+    setStoredValue(LOCAL_CAPTURE_EVENTS_KEY, JSON.stringify(localCaptureEvents));
+  }, [localCaptureEvents]);
+
+  useEffect(() => {
+    setStoredValue(LOCAL_HAR_HISTORY_KEY, JSON.stringify(localHarHistory));
+  }, [localHarHistory]);
+
+  useEffect(() => {
+    if (normalizedHarHistory.length === 0) {
+      setSelectedHarHistoryKey("");
+      return;
+    }
+
+    if (!normalizedHarHistory.some((item) => item.historyKey === selectedHarHistoryKey)) {
+      setSelectedHarHistoryKey(normalizedHarHistory[0].historyKey);
+    }
+  }, [normalizedHarHistory, selectedHarHistoryKey]);
 
   useEffect(() => {
     setStoredValue("http-analyzer-suppressed-findings", JSON.stringify(suppressedFindings));
@@ -1985,15 +2415,71 @@ export default function App() {
 
     try {
       const snapshot = buildInspectionSnapshot();
+      const endedAt = new Date().toISOString();
+      const localRun = {
+        id: `local-run-${Date.now()}`,
+        created_at: endedAt,
+        pending_sync: true,
+        capture_session_id: captureSessionId || null,
+        target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
+        started_at: captureStartedAt || null,
+        ended_at: endedAt,
+        total_exchanges: analyzedExchanges.length,
+        total_errors: errors.length,
+        total_findings: allSecurityFindings.length,
+        critical_findings: criticalAlerts.length,
+        high_findings: highAlerts.length,
+        security_only: securityOnly,
+        mask_sensitive: maskSensitive,
+        excluded_patterns: getCombinedExcludePatterns(excludeInput),
+        owasp_summary: owaspSummary,
+        endpoint_summary: endpointSummary.slice(0, 10),
+        report_snapshot: snapshot
+      };
+      const localEvents = analyzedExchanges
+        .slice()
+        .reverse()
+        .slice(0, 20)
+        .map((exchange, index) => ({
+          id: `local-event-${Date.now()}-${index}`,
+          created_at: exchange.timestamp || endedAt,
+          pending_sync: true,
+          capture_session_id: captureSessionId || null,
+          target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
+          request_method: exchange.request?.method || "?",
+          request_url: exchange.request?.url || exchange.endpointKey || "",
+          request_resource_type: exchange.request?.resourceType || "-",
+          request_timestamp: exchange.timestamp || endedAt,
+          request_headers: exchange.request?.headers || {},
+          request_body: exchange.request?.postData || "",
+          response_status: exchange.response?.status || null,
+          response_status_text: exchange.response?.statusText || null,
+          response_timestamp: exchange.response?.timestamp || null,
+          response_url: exchange.response?.url || null,
+          response_headers: exchange.response?.headers || {},
+          response_body_preview: exchange.response?.bodyPreview || "",
+          error_text: "",
+          historySource: "local"
+        }))
+        .filter((item) => !isAbortedErrorText(item.error_text));
+
+      setLocalInspectionRuns((current) =>
+        [localRun, ...current].slice(0, 20)
+      );
+      setLocalCaptureEvents((current) =>
+        [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 40)
+      );
+      setErrors((current) => current.filter((item) => !isAbortedErrorText(item.errorText)));
+
       if (captureSessionId || domain) {
-        await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+        const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             capture_session_id: captureSessionId || null,
             target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
             started_at: captureStartedAt || null,
-            ended_at: new Date().toISOString(),
+            ended_at: endedAt,
             total_exchanges: analyzedExchanges.length,
             total_errors: errors.length,
             total_findings: allSecurityFindings.length,
@@ -2006,7 +2492,11 @@ export default function App() {
             endpoint_summary: endpointSummary.slice(0, 10),
             report_snapshot: snapshot
           })
-        }).catch(() => {});
+        }).catch(() => null);
+
+        if (inspectionResponse?.ok) {
+          setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
+        }
       }
 
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
@@ -2046,6 +2536,41 @@ export default function App() {
     setHarUploadResult(null);
 
     try {
+      const localHarText = await harFile.text();
+      const localHar = JSON.parse(localHarText);
+      const localSummary = analyzeHarLocally(localHar);
+      const fingerprint = buildHarHistoryFingerprint({
+        fileName: harFile.name,
+        fileSize: harFile.size,
+        summary: localSummary
+      });
+      const localHistoryItem = {
+        id: `local-${Date.now()}`,
+        created_at: new Date().toISOString(),
+        file_name: harFile.name,
+        file_size: harFile.size,
+        total_entries: localSummary.totalEntries,
+        average_wait_ms: localSummary.averageWaitMs,
+        slowest_url: localSummary.slowestEntry?.url || null,
+        summary: localSummary,
+        fingerprint
+      };
+
+      setHarUploadResult({
+        fileName: harFile.name,
+        fileSize: harFile.size,
+        summary: localSummary,
+        storage: {
+          saved: false,
+          reason: "로컬 분석 결과입니다. 서버 저장 상태는 확인 중입니다."
+        }
+      });
+      setLocalHarHistory((current) => [
+        localHistoryItem,
+        ...current.filter((item) => item.fingerprint !== fingerprint)
+      ].slice(0, 12));
+      setSelectedHarHistoryKey(`local:${localHistoryItem.id}`);
+
       const formData = new FormData();
       formData.append("har", harFile);
 
@@ -2061,6 +2586,9 @@ export default function App() {
       }
 
       setHarUploadResult(data || null);
+      if (data?.storage?.saved) {
+        setLocalHarHistory((current) => current.filter((item) => item.fingerprint !== fingerprint));
+      }
 
       try {
         const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`);
@@ -2124,6 +2652,23 @@ export default function App() {
       headers: prettyJson(exchange.request.headers),
       body: payload === "(none)" ? "" : payload
     });
+  }
+
+  function generateCaptureMermaid() {
+    setCaptureMermaidModal(buildCaptureMermaid(visibleExchanges));
+  }
+
+  async function copyCaptureMermaid() {
+    if (!captureMermaidModal || typeof navigator === "undefined" || !navigator.clipboard) {
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(captureMermaidModal);
+      setCaptureMermaidModal("");
+    } catch {
+      return;
+    }
   }
 
   function buildHtmlReportDocument(reportInput = {}, { forPrint = false } = {}) {
@@ -2559,48 +3104,90 @@ window.addEventListener("load", () => {
   const findingEntries = visibleExchanges.flatMap((exchange) =>
     (exchange.securityFindings || []).map((finding) => ({ exchange, finding }))
   );
+  const displayedFindingEntries = focusedFindingExchangeId
+    ? findingEntries.filter(({ exchange }) => exchange.id === focusedFindingExchangeId)
+    : findingEntries;
 
   const navigationItems = [
     {
       key: "overview",
+      icon: "overview",
       label: "Overview",
       description: "위험도와 요약 현황",
       count: allSecurityFindings.length
     },
     {
       key: "capture",
+      icon: "capture",
       label: "Capture",
       description: "실시간 캡처와 요청 목록",
       count: visibleExchanges.length
     },
     {
       key: "findings",
+      icon: "findings",
       label: "Findings",
       description: "탐지된 보안 이슈",
       count: findingEntries.length
     },
     {
       key: "har",
+      icon: "har",
       label: "HAR",
       description: "파일 업로드와 분석 결과",
-      count: recentHarAnalyses.length
+      count: mergedHarHistory.length
     },
     {
       key: "recent",
+      icon: "recent",
       label: "Recent Data",
       description: "최근 저장된 캡처 기록",
-      count: recentCaptureEvents.length + recentInspectionRuns.length
+      count: mergedCaptureEvents.length + mergedInspectionRuns.length
     }
   ];
 
+  function navigateToSection(sectionKey) {
+    if (sectionKey !== "findings") {
+      setFocusedFindingExchangeId("");
+    }
+
+    if (sectionKey === "findings" && activeSection !== "capture") {
+      setFocusedFindingExchangeId("");
+    }
+
+    setActiveSection(sectionKey);
+  }
+
+  useEffect(() => {
+    if (activeSection !== "findings" || !focusedFindingExchangeId) {
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      const target = document.querySelector(
+        `[data-finding-exchange-id="${CSS.escape(focusedFindingExchangeId)}"]`
+      );
+      target?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 60);
+
+    return () => window.clearTimeout(timer);
+  }, [activeSection, focusedFindingExchangeId, displayedFindingEntries.length]);
+
   return (
-    <main className="page-shell">
-      <div className="app-layout">
+    <main ref={appShellRef} className="page-shell">
+      <div className={`app-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
         <aside className="sidebar-card">
           <div className="sidebar-brand">
-            <p className="eyebrow">Workspace</p>
-            <h1 className="page-title">HTTP Analyzer</h1>
-            <p className="sidebar-copy">기능별로 화면을 나눠서 필요한 작업만 집중해서 볼 수 있게 정리했습니다.</p>
+            <div className="sidebar-brand-row">
+              <h1 className="page-title sidebar-title">HTTP Analyzer</h1>
+              <button
+                type="button"
+                className="sidebar-toggle-button"
+                onClick={() => setSidebarCollapsed((current) => !current)}
+              >
+                {sidebarCollapsed ? "열기" : "숨기기"}
+              </button>
+            </div>
           </div>
           <nav className="sidebar-nav">
             {navigationItems.map((item) => (
@@ -2608,9 +3195,14 @@ window.addEventListener("load", () => {
                 key={item.key}
                 type="button"
                 className={`sidebar-nav-item ${activeSection === item.key ? "active" : ""}`}
-                onClick={() => setActiveSection(item.key)}
+                onClick={() => navigateToSection(item.key)}
               >
-                <span className="sidebar-nav-label">{item.label}</span>
+                <div className="sidebar-nav-topline">
+                  <span className="sidebar-nav-icon">
+                    <NavigationIcon name={item.icon} />
+                  </span>
+                  <span className="sidebar-nav-label">{item.label}</span>
+                </div>
                 <span className="sidebar-nav-description">{item.description}</span>
                 <span className="sidebar-nav-count">{item.count}</span>
               </button>
@@ -2622,6 +3214,7 @@ window.addEventListener("load", () => {
           <section className="hero-card filter-shell">
             <div className="topbar">
               <div>
+                <p className="eyebrow">Operations Overview</p>
                 <h1 className="page-title">HTTP Analyzer</h1>
               </div>
               <div className="topbar-badges">
@@ -2630,7 +3223,6 @@ window.addEventListener("load", () => {
                     <img src={authUser.picture} alt={authUser.name} className="user-avatar" />
                   ) : null}
                   <div>
-                    <strong>{authUser.name}</strong>
                     <span>{authUser.email}</span>
                   </div>
                 </div>
@@ -2658,91 +3250,120 @@ window.addEventListener("load", () => {
                 </button>
               </div>
             </div>
+            <div className="dashboard-ribbon">
+              <div className="dashboard-ribbon-card">
+                <span className="dashboard-ribbon-label">Current Module</span>
+                <strong>{navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}</strong>
+              </div>
+              <div className="dashboard-ribbon-card">
+                <span className="dashboard-ribbon-label">Security Findings</span>
+                <strong>{allSecurityFindings.length}</strong>
+              </div>
+              <div className="dashboard-ribbon-card">
+                <span className="dashboard-ribbon-label">Visible Requests</span>
+                <strong>{visibleExchanges.length}</strong>
+              </div>
+              <div className="dashboard-ribbon-card">
+                <span className="dashboard-ribbon-label">Recent HAR Runs</span>
+                <strong>{mergedHarHistory.length}</strong>
+              </div>
+            </div>
 
             {activeSection === "capture" ? (
-              <form className="capture-form filter-bar" onSubmit={startCapture}>
-                <label className="field-label field-card">
-                  <span>URL:</span>
-                  <input
-                    type="text"
-                    placeholder="도메인 입력"
-                    value={domain}
-                    onChange={(event) => setDomain(event.target.value)}
-                  />
-                </label>
-                <label className="field-label field-card">
-                  <span>Excluded:</span>
-                  <input
-                    type="text"
-                    placeholder="추가 제외 패턴 입력"
-                    value={excludeInput}
-                    onChange={(event) => setExcludeInput(event.target.value)}
-                  />
-                </label>
-                <p className="field-hint">
-                  이미지 요청은 항상 제외됩니다. 여기에 입력하는 값은 추가 제외 패턴입니다.
-                </p>
-                <div className="action-row action-card">
-                  <button type="submit" disabled={submitting || active}>
-                    {submitting ? "처리 중..." : "캡처 시작"}
-                  </button>
-                  <button type="button" disabled={submitting || !active} onClick={stopCapture}>
-                    캡처 중지
-                  </button>
-                  <details className="export-menu">
-                    <summary className={visibleExchanges.length === 0 ? "disabled-summary" : ""}>
-                      Export
-                    </summary>
-                    <div className="export-menu-list">
-                      <button
-                        type="button"
-                        disabled={visibleExchanges.length === 0}
-                        onClick={downloadHtmlReport}
-                      >
-                        HTML 출력
-                      </button>
-                      <button
-                        type="button"
-                        disabled={visibleExchanges.length === 0}
-                        onClick={downloadPdfReport}
-                      >
-                        PDF 출력
-                      </button>
-                      <button
-                        type="button"
-                        disabled={visibleExchanges.length === 0}
-                        onClick={downloadJsonReport}
-                      >
-                        JSON 출력
-                      </button>
-                      <button
-                        type="button"
-                        disabled={visibleExchanges.length === 0}
-                        onClick={downloadMarkdownReport}
-                      >
-                        MD 출력
-                      </button>
-                      <button
-                        type="button"
-                        disabled={visibleExchanges.length === 0}
-                        onClick={downloadCsvReport}
-                      >
-                        CSV 출력
-                      </button>
-                    </div>
-                  </details>
-                  <button
-                    type="button"
-                    disabled={suppressedFindings.length + sessionSuppressedFindings.length === 0}
-                    onClick={clearSuppressedFindings}
-                  >
-                    오탐 초기화
-                  </button>
-                </div>
-              </form>
-            ) : (
-              <div className="section-intro">
-                <p className="eyebrow">Current Section</p>
+              <div className="capture-control-panel">
+                <form className="capture-form filter-bar" onSubmit={startCapture}>
+                  <label className="field-label field-card">
+                    <span>URL:</span>
+                    <input
+                      type="text"
+                      placeholder="도메인 입력"
+                      value={domain}
+                      onChange={(event) => setDomain(event.target.value)}
+                    />
+                  </label>
+                  <label className="field-label field-card">
+                    <span>Excluded:</span>
+                    <input
+                      type="text"
+                      placeholder="추가 제외 패턴 입력"
+                      value={excludeInput}
+                      onChange={(event) => setExcludeInput(event.target.value)}
+                    />
+                  </label>
+                  <p className="field-hint">
+                    이미지 요청은 항상 제외됩니다. 여기에 입력하는 값은 추가 제외 패턴입니다.
+                  </p>
+                  <div className="action-row action-card">
+                    <button type="submit" disabled={submitting || active}>
+                      {submitting ? "처리 중..." : "캡처 시작"}
+                    </button>
+                    <button type="button" disabled={submitting || !active} onClick={stopCapture}>
+                      캡처 중지
+                    </button>
+                    <button
+                      type="button"
+                      disabled={visibleExchanges.length === 0}
+                      onClick={generateCaptureMermaid}
+                    >
+                      Generate Mermaid
+                    </button>
+                    <details className="export-menu">
+                      <summary className={visibleExchanges.length === 0 ? "disabled-summary" : ""}>
+                        Export
+                      </summary>
+                      <div className="export-menu-list">
+                        <button
+                          type="button"
+                          disabled={visibleExchanges.length === 0}
+                          onClick={downloadHtmlReport}
+                        >
+                          HTML 출력
+                        </button>
+                        <button
+                          type="button"
+                          disabled={visibleExchanges.length === 0}
+                          onClick={downloadPdfReport}
+                        >
+                          PDF 출력
+                        </button>
+                        <button
+                          type="button"
+                          disabled={visibleExchanges.length === 0}
+                          onClick={downloadJsonReport}
+                        >
+                          JSON 출력
+                        </button>
+                        <button
+                          type="button"
+                          disabled={visibleExchanges.length === 0}
+                          onClick={downloadMarkdownReport}
+                        >
+                          MD 출력
+                        </button>
+                        <button
+                          type="button"
+                          disabled={visibleExchanges.length === 0}
+                          onClick={downloadCsvReport}
+                        >
+                          CSV 출력
+                        </button>
+                      </div>
+                    </details>
+                    <button
+                      type="button"
+                      disabled={suppressedFindings.length + sessionSuppressedFindings.length === 0}
+                      onClick={clearSuppressedFindings}
+                    >
+                      오탐 초기화
+                    </button>
+                  </div>
+                </form>
+              </div>
+            ) : activeSection === "overview" ||
+              activeSection === "findings" ||
+              activeSection === "har" ||
+              activeSection === "recent" ? null : (
+              <div className={`section-intro ${activeSection === "findings" ? "findings-intro" : ""}`}>
                 <h2 className="section-title">
                   {navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}
                 </h2>
@@ -2754,8 +3375,8 @@ window.addEventListener("load", () => {
             )}
 
             {statusMessage ? <p className="status">{statusMessage}</p> : null}
-            {errors.length > 0 ? (
-              <div className="error-strip">{errors[errors.length - 1]?.errorText}</div>
+            {visibleErrors.length > 0 ? (
+              <div className="error-strip">{visibleErrors[visibleErrors.length - 1]?.errorText}</div>
             ) : null}
           </section>
 
@@ -2816,8 +3437,8 @@ window.addEventListener("load", () => {
               <article className="panel stacked-panel">
                 <div className="har-panel section-panel">
                   <strong>HAR Upload</strong>
-                  <div className="har-panel-grid">
-                    <div className="har-upload-box">
+                  <div className="har-upload-row">
+                    <div className="har-upload-inline">
                       <input
                         type="file"
                         accept=".har,application/json"
@@ -2830,43 +3451,78 @@ window.addEventListener("load", () => {
                       >
                         {harUploading ? "업로드 중..." : "HAR 분석 업로드"}
                       </button>
-                      {harUploadError ? <div className="error-strip">{harUploadError}</div> : null}
-                      {harUploadResult ? (
-                        <div className="har-result-card">
-                          <strong>{harUploadResult.fileName}</strong>
-                          <span>
-                            저장 상태:{" "}
-                            {harUploadResult.storage?.saved
-                              ? "Supabase 저장 완료"
-                              : harUploadResult.storage?.reason || "저장 안 됨"}
-                          </span>
-                          <span>총 요청: {harUploadResult.summary?.totalEntries ?? 0}</span>
-                          <span>평균 대기(ms): {harUploadResult.summary?.averageWaitMs ?? 0}</span>
-                          <span>
-                            가장 느린 URL: {harUploadResult.summary?.slowestEntry?.url || "-"}
-                          </span>
-                        </div>
-                      ) : null}
                     </div>
+                  </div>
+                  {harUploadError ? <div className="error-strip">{harUploadError}</div> : null}
+                  {harUploadResult ? (
+                    <div className="har-latest-row">
+                      <strong>방금 업로드한 결과</strong>
+                      <div className="har-result-card">
+                        <strong>{harUploadResult.fileName}</strong>
+                        <span>
+                          저장 상태:{" "}
+                          {harUploadResult.storage?.saved
+                            ? "Supabase 저장 완료"
+                            : harUploadResult.storage?.reason || "로컬 분석 결과"}
+                        </span>
+                        <span>총 요청: {harUploadResult.summary?.totalEntries ?? 0}</span>
+                        <span>평균 대기(ms): {harUploadResult.summary?.averageWaitMs ?? 0}</span>
+                        <span>
+                          가장 느린 URL: {harUploadResult.summary?.slowestEntry?.url || "-"}
+                        </span>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="har-panel-grid">
                     <div className="har-upload-box">
-                      <strong>최근 HAR 분석 결과</strong>
-                      <div className="recent-list">
-                        {recentHarAnalyses.length === 0 ? (
+                      <strong>HAR 분석 이력</strong>
+                      <div className="har-history-list">
+                        {normalizedHarHistory.length === 0 ? (
                           <span className="empty-copy">
                             {recentLoading ? "불러오는 중..." : "최근 HAR 분석 결과가 없습니다."}
                           </span>
                         ) : (
-                          recentHarAnalyses.map((item) => (
-                            <div key={item.id} className="recent-card">
-                              <strong>{item.file_name}</strong>
-                              <span>{formatDateTime(item.created_at)}</span>
-                              <span>총 요청: {item.total_entries}</span>
-                              <span>평균 대기(ms): {item.average_wait_ms}</span>
-                              <span>가장 느린 URL: {item.slowest_url || "-"}</span>
-                            </div>
+                          normalizedHarHistory.map((item) => (
+                            <button
+                              key={item.historyKey}
+                              type="button"
+                              className={`har-history-row ${
+                                selectedHarHistoryKey === item.historyKey ? "active" : ""
+                              }`}
+                              onClick={() => setSelectedHarHistoryKey(item.historyKey)}
+                            >
+                              <span className="har-history-name">{item.displayFileName}</span>
+                              <span className="har-history-meta">
+                                {item.historySource === "local" ? "로컬" : "DB"} ·{" "}
+                                {formatDateTime(item.displayCreatedAt)} · 요청 {item.summary?.totalEntries ?? 0}건
+                              </span>
+                            </button>
                           ))
                         )}
                       </div>
+                    </div>
+                    <div className="har-upload-box">
+                      <strong>분석 결과</strong>
+                      {selectedHarHistory ? (
+                        <div className="har-result-card">
+                          <strong>{selectedHarHistory.displayFileName}</strong>
+                          <span>
+                            저장 상태:{" "}
+                            {selectedHarHistory.historySource === "db"
+                              ? "Supabase 저장 완료"
+                              : harUploadResult?.storage?.saved
+                              ? "Supabase 저장 완료"
+                              : harUploadResult?.storage?.reason || "로컬 분석 결과"}
+                          </span>
+                          <span>총 요청: {selectedHarHistory.summary?.totalEntries ?? 0}</span>
+                          <span>평균 대기(ms): {selectedHarHistory.summary?.averageWaitMs ?? 0}</span>
+                          <span>
+                            가장 느린 URL: {selectedHarHistory.summary?.slowestEntry?.url || "-"}
+                          </span>
+                        </div>
+                      ) : (
+                        <span className="empty-copy">HAR 파일을 업로드하면 여기에서 분석 결과를 보여줍니다.</span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -2891,14 +3547,22 @@ window.addEventListener("load", () => {
                 <div className="recent-capture-panel section-panel">
                   <strong>Recent Inspection Runs</strong>
                   <div className="recent-list">
-                    {recentInspectionRuns.length === 0 ? (
+                    {mergedInspectionRuns.length === 0 ? (
                       <span className="empty-copy">
                         {recentLoading ? "불러오는 중..." : "최근 점검 이력이 없습니다."}
                       </span>
                     ) : (
-                      recentInspectionRuns.map((item) => (
+                      mergedInspectionRuns.map((item) => (
                         <div key={item.id} className="recent-card">
                           <strong>{item.target_url || "-"}</strong>
+                          <span>
+                            출처:{" "}
+                            {item.historySource === "local"
+                              ? item.pending_sync
+                                ? "로컬(대기)"
+                                : "로컬"
+                              : "DB"}
+                          </span>
                           <span>
                             점검 시간: {formatDateTime(item.started_at)} ~ {formatDateTime(item.ended_at)}
                           </span>
@@ -2977,17 +3641,25 @@ window.addEventListener("load", () => {
                   </div>
                   <strong>Recent Capture Events</strong>
                   <div className="recent-list">
-                    {recentCaptureEvents.length === 0 ? (
+                    {mergedCaptureEvents.length === 0 ? (
                       <span className="empty-copy">
                         {recentLoading ? "불러오는 중..." : "최근 캡처 이벤트가 없습니다."}
                       </span>
                     ) : (
-                      recentCaptureEvents.map((item) => (
+                      mergedCaptureEvents.map((item) => (
                         <div key={item.id} className="recent-card">
                           <strong>
                             {item.request_method || "?"}{" "}
                             {item.request_url || item.target_url || "-"}
                           </strong>
+                          <span>
+                            출처:{" "}
+                            {item.historySource === "local"
+                              ? item.pending_sync
+                                ? "로컬(대기)"
+                                : "로컬"
+                              : "DB"}
+                          </span>
                           <span>{formatDateTime(item.created_at)}</span>
                           <span>세션: {item.capture_session_id || "-"}</span>
                           <span>상태: {item.response_status || item.error_text || "-"}</span>
@@ -3005,13 +3677,19 @@ window.addEventListener("load", () => {
             <section className="pair-list">
               <article className="panel stacked-panel">
                 <div className="entry-list findings-list">
-                  {findingEntries.length === 0 ? (
+                  {displayedFindingEntries.length === 0 ? (
                     <div className="empty-state-card">
                       현재 조건에서 보여줄 보안 finding이 없습니다.
                     </div>
                   ) : (
-                    findingEntries.map(({ exchange, finding }, index) => (
-                      <article key={`${exchange.id}-${finding.key}-${index}`} className="finding-focus-card">
+                    displayedFindingEntries.map(({ exchange, finding }, index) => (
+                      <article
+                        key={`${exchange.id}-${finding.key}-${index}`}
+                        className={`finding-focus-card ${
+                          exchange.id === focusedFindingExchangeId ? "finding-focus-card-active" : ""
+                        }`}
+                        data-finding-exchange-id={exchange.id}
+                      >
                         <div className="finding-focus-head">
                           <div>
                             <strong>{finding.title}</strong>
@@ -3105,106 +3783,38 @@ window.addEventListener("load", () => {
 
                         return (
                           <article key={exchange.id} className="exchange-card">
-                  {securityFindings.length > 0 ? (
-                    <div className="security-reason-bar">
-                      <div className="security-reason-header">
-                        <strong>Security Findings</strong>
-                        <span>패턴 기반 분석 결과이므로 실제 취약 여부는 재검증이 필요합니다.</span>
-                      </div>
-                      <div className="owasp-summary">
-                        {summarizeFindingsByOwasp(securityFindings).map((item) => (
-                          <span key={item.key} className="owasp-chip">
-                            {item.label} ({item.count})
-                          </span>
-                        ))}
-                      </div>
-                      <div className="security-reason-list">
-                        {securityFindings.map((finding) => (
-                          <div key={finding.key} className={`security-reason-item severity-${finding.severity}`}>
-                            <div className="security-reason-topline">
-                              <span className="security-reason-title">{finding.title}</span>
-                              <span className={`severity-chip severity-chip-${finding.severity}`}>
-                                {finding.severityLabel}
-                              </span>
-                            </div>
-                            <span className="security-reason-owasp">OWASP: {finding.owaspLabel}</span>
-                            <span className="security-reason-area">Area: {finding.area}</span>
-                            <span className="security-reason-description">
-                              Evidence: {maybeMask(finding.evidence, maskSensitive)}
-                            </span>
-                            <span className="security-reason-guide">
-                              Guide: {finding.guide}
-                            </span>
-                            <span className="security-reason-remediation">
-                              Remediation: {finding.remediation}
-                            </span>
-                            <span className="security-reason-confidence">
-                              Confidence: {finding.confidenceLabel}
-                            </span>
-                            <details className="security-poc">
-                              <summary>PoC Template</summary>
-                              <pre>{maybeMask(generateFindingPoc(finding, exchange), maskSensitive)}</pre>
-                            </details>
-                            <div className="security-reason-checklist">
-                              <strong>Reproduction Checklist</strong>
-                              <ul>
-                                {finding.checklist.map((item) => (
-                                  <li key={item}>{item}</li>
-                                ))}
-                              </ul>
-                            </div>
-                            <div className="finding-actions">
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  injectPocIntoReplay(finding, exchange);
-                                }}
-                              >
-                                PoC를 Replay에 주입
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  suppressFindingByScope("session", finding, exchange);
-                                }}
-                              >
-                                세션 오탐
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  suppressFindingByScope("endpoint", finding, exchange);
-                                }}
-                              >
-                                엔드포인트 오탐
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  suppressFindingByScope("host", finding, exchange);
-                                }}
-                              >
-                                호스트 오탐
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  suppressFindingByScope("global", finding, exchange);
-                                }}
-                              >
-                                전역 오탐
-                              </button>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ) : null}
+                            {securityFindings.length > 0 ? (
+                              <div className="security-summary-bar">
+                                <div className="security-summary-copy">
+                                  <strong>Security Findings {securityFindings.length}건</strong>
+                                  <span>
+                                    Critical {securityFindings.filter((item) => item.severity === "critical").length}
+                                    {" / "}High {securityFindings.filter((item) => item.severity === "high").length}
+                                    {" / "}Medium {securityFindings.filter((item) => item.severity === "medium").length}
+                                  </span>
+                                </div>
+                                <div className="security-summary-actions">
+                                  {["critical", "high", "medium", "low"]
+                                    .filter((severity) =>
+                                      securityFindings.some((item) => item.severity === severity)
+                                    )
+                                    .map((severity) => (
+                                      <span key={severity} className={`severity-chip severity-chip-${severity}`}>
+                                        {SEVERITY_LABELS[severity]}
+                                      </span>
+                                    ))}
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setFocusedFindingExchangeId(exchange.id);
+                                      setActiveSection("findings");
+                                    }}
+                                  >
+                                    Findings에서 보기
+                                  </button>
+                                </div>
+                              </div>
+                            ) : null}
                   <button
                     type="button"
                     className="exchange-column interactive-column"
@@ -3350,6 +3960,11 @@ window.addEventListener("load", () => {
         onClose={() => setInspectionModalRun(null)}
         onDownloadHtml={downloadHtmlReport}
         onDownloadPdf={downloadPdfReport}
+      />
+      <MermaidModal
+        code={captureMermaidModal}
+        onClose={() => setCaptureMermaidModal("")}
+        onCopy={copyCaptureMermaid}
       />
     </main>
   );

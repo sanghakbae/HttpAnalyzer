@@ -582,6 +582,29 @@ app.post("/api/inspection-runs", async (request, response) => {
   }
 });
 
+app.post("/api/capture-events/batch", async (request, response) => {
+  const events = Array.isArray(request.body?.events) ? request.body.events : null;
+
+  if (!events || events.length === 0) {
+    response.status(400).json({ error: "events array is required." });
+    return;
+  }
+
+  if (!supabase) {
+    response.status(400).json({ saved: false, reason: "Supabase credentials are not configured." });
+    return;
+  }
+
+  const { error } = await supabase.from("capture_http_events").insert(events);
+
+  if (error) {
+    response.status(400).json({ saved: false, reason: error.message });
+    return;
+  }
+
+  response.json({ saved: true, count: events.length });
+});
+
 app.post("/api/replay-request", async (request, response) => {
   const { url, method, headers, body } = request.body ?? {};
 

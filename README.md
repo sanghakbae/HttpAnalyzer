@@ -15,12 +15,15 @@
 - 실시간 HTTP 요청/응답 캡처
 - 요청/응답 헤더 및 바디 확인
 - 특정 요청 재전송(Replay)
+- 캡처 흐름 기반 Mermaid 다이어그램 생성
 - HAR 파일 업로드 및 성능/호스트/상태코드 분석
 - 보안 패턴 탐지 및 `OWASP Top 10` 기준 요약
 - 엔드포인트 우선순위 정리
 - `Before / After` 비교용 Diff
 - `HTML / PDF / JSON / Markdown / CSV` 리포트 출력
 - HAR 분석 결과, 실시간 캡처 이벤트, 점검 이력을 Supabase에 저장
+- 서버 저장 실패 시 `Recent Data` 로컬 fallback 저장
+- 로컬 fallback 항목의 자동 재업로드 큐
 
 ## 현재 UI에서 지원하는 보안 분석
 
@@ -194,6 +197,9 @@ npm run dev
 
 - 이미지 요청은 기본적으로 항상 제외됩니다.
 - `Excluded` 입력칸은 추가 제외 규칙만 받습니다.
+- `Capture` 화면에서는 요청별 보안 finding 요약만 보여주고, 상세 내용은 `Findings` 메뉴에서 확인합니다.
+- `Findings에서 보기`를 누르면 해당 요청의 finding만 필터되어 바로 이동합니다.
+- 종료 과정에서 발생한 `net::ERR_ABORTED`는 종료성 노이즈로 간주해 UI와 Recent Data에서 숨깁니다.
 
 ### 리플레이
 
@@ -204,6 +210,15 @@ npm run dev
 보안 finding이 있는 경우:
 
 - `PoC를 Replay에 주입` 버튼으로 재현 템플릿을 바로 모달에 넣을 수 있습니다.
+- 긴 응답은 모달 내부에서 스크롤됩니다.
+
+### Mermaid 생성
+
+`Capture` 화면의 `Generate Mermaid` 버튼으로 현재 캡처된 요청을 기반으로 Mermaid 흐름도를 만들 수 있습니다.
+
+- 결과는 본문이 아니라 전용 팝업으로 표시됩니다.
+- 팝업 우측 상단 `복사` 버튼으로 Mermaid 코드를 바로 복사할 수 있습니다.
+- 복사 후 팝업은 자동으로 닫힙니다.
 
 ### HAR 분석
 
@@ -229,6 +244,14 @@ npm run dev
 - 최근 7일 / 30일 기준 통계 대시보드
 - 점검 이력 상세 모달
 - 점검 이력별 `HTML / PDF` 리포트 재다운로드
+- 항목별 저장 출처(`DB`, `로컬`, `로컬(대기)`)
+
+중요:
+
+- DB 저장이 실패해도 `Recent Data`에는 로컬 fallback으로 즉시 표시됩니다.
+- `로컬(대기)`는 아직 DB 동기화가 안 된 항목입니다.
+- 앱이 다시 열리거나 주기 동기화가 돌 때 서버가 정상이면 자동으로 재업로드를 시도합니다.
+- 재업로드가 성공하면 로컬 대기 항목은 제거되고 DB 이력만 남습니다.
 
 ## Supabase 연동
 
@@ -368,6 +391,8 @@ add column if not exists report_snapshot jsonb not null default '{}'::jsonb;
   보안 패턴 탐지 확인용
 - [samples/sample-large.har](/Users/mac/Tools/HttpViewer/samples/sample-large.har)
   대량 요청 흐름 확인용
+- [samples/sample-vulnerable.har](/Users/mac/Tools/HttpViewer/samples/sample-vulnerable.har)
+  민감정보 노출, 보안 헤더 누락, 주입 흔적 등 취약 징후 테스트용
 
 ## UI 보조 기능
 
@@ -414,6 +439,15 @@ finding이 많이 몰린 엔드포인트를 우선순위로 정리합니다.
 - 자주 걸린 OWASP 카테고리
 
 기본 상태는 접힘입니다.
+
+### Recent Data 저장 정책
+
+최근 점검 이력과 캡처 이벤트는 두 단계로 관리합니다.
+
+- 1차: 로컬 브라우저 저장
+- 2차: Supabase 저장
+
+저장 실패 시에도 사용자는 `Recent Data`에서 바로 이력을 볼 수 있어야 하므로, 캡처 종료 시점에 먼저 로컬 fallback을 기록합니다. 이후 백엔드가 정상 응답하면 자동 재업로드 큐가 DB 저장을 다시 시도합니다.
 
 ## 개발 팁
 
