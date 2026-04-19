@@ -25,6 +25,7 @@ const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const disableCapture = process.env.DISABLE_CAPTURE === "true";
 const playwrightHeadless =
   process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
+const captureReadyDelayMs = Number(process.env.CAPTURE_READY_DELAY_MS || 3000);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -55,6 +56,12 @@ function trimCollection(collection, max = 250) {
   if (collection.length > max) {
     collection.splice(0, collection.length - max);
   }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 function normalizeUrl(input) {
@@ -399,6 +406,10 @@ async function launchCaptureSession(domain, excludePatterns = []) {
   captureState.sessionId = randomUUID();
   captureState.targetUrl = targetUrl;
   captureState.excludePatterns = excludePatterns;
+
+  if (captureReadyDelayMs > 0) {
+    await sleep(captureReadyDelayMs);
+  }
 }
 
 function analyzeHar(har) {

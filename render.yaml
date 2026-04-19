@@ -17,6 +17,8 @@ services:
         value: "true"
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: "0"
+      - key: CAPTURE_READY_DELAY_MS
+        value: "3000"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
