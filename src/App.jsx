@@ -9,6 +9,7 @@ const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
 const LOCAL_INSPECTION_RUNS_KEY = "http-analyzer-local-inspection-runs";
 const LOCAL_CAPTURE_EVENTS_KEY = "http-analyzer-local-capture-events";
+const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
 const TOKEN_REGEX = new RegExp(
@@ -40,6 +41,15 @@ const OPEN_REDIRECT_REGEX =
   /(?:[?&](?:next|url|target|dest|destination|redirect|return|returnUrl|continue)=https?:\/\/)[^&]+/i;
 const SSRF_REGEX =
   /(?:[?&](?:url|uri|path|target|dest|destination|endpoint)=https?:\/\/)(?:localhost|127\.0\.0\.1|0\.0\.0\.0|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|169\.254\.169\.254)/i;
+const DEFAULT_OPENAI_SUMMARY_PROMPT = `다음 HTTP 캡처 결과를 한국어로 분석해줘.
+
+목표:
+1. 전체 요약을 5줄 이내로 작성
+2. 보안상 우선 확인해야 할 엔드포인트를 위험도 순으로 정리
+3. SQL Injection, XSS, 인증/세션, CORS, 민감정보 노출 관점의 근거를 분리
+4. 실제 캡처 데이터에서 확인되는 증거만 사용하고 추측은 "추가 확인 필요"로 표시
+5. SQLMap으로 점검할 후보 URL과 파라미터를 제안
+6. 개발자가 바로 수행할 다음 조치 체크리스트를 작성`;
 
 const SEVERITY_LABELS = {
   critical: "Critical",
@@ -248,6 +258,24 @@ function NavigationIcon({ name }) {
         <svg {...commonProps}>
           <circle cx="12" cy="12" r="8" />
           <path d="M12 7v5l3 2" />
+        </svg>
+      );
+    case "sqlmap":
+      return (
+        <svg {...commonProps}>
+          <path d="M4 5h16" />
+          <path d="M7 5v14" />
+          <path d="M17 5v14" />
+          <path d="M4 19h16" />
+          <path d="M9 10h6" />
+          <path d="M9 14h6" />
+        </svg>
+      );
+    case "settings":
+      return (
+        <svg {...commonProps}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.8 1.8 0 0 0 .36 2l.04.04a2 2 0 0 1-2.83 2.83l-.04-.04a1.8 1.8 0 0 0-2-.36 1.8 1.8 0 0 0-1.1 1.66V21a2 2 0 0 1-4 0v-.06A1.8 1.8 0 0 0 8.7 19.3a1.8 1.8 0 0 0-2 .36l-.04.04a2 2 0 0 1-2.83-2.83l.04-.04a1.8 1.8 0 0 0 .36-2 1.8 1.8 0 0 0-1.66-1.1H2.5a2 2 0 0 1 0-4h.06A1.8 1.8 0 0 0 4.2 8.7a1.8 1.8 0 0 0-.36-2l-.04-.04a2 2 0 0 1 2.83-2.83l.04.04a1.8 1.8 0 0 0 2 .36h.01A1.8 1.8 0 0 0 9.8 2.6V2.5a2 2 0 0 1 4 0v.06a1.8 1.8 0 0 0 1.1 1.66 1.8 1.8 0 0 0 2-.36l.04-.04a2 2 0 0 1 2.83 2.83l-.04.04a1.8 1.8 0 0 0-.36 2 1.8 1.8 0 0 0 1.66 1.1h.06a2 2 0 0 1 0 4h-.06A1.8 1.8 0 0 0 19.4 15Z" />
         </svg>
       );
     default:
@@ -2124,6 +2152,26 @@ export default function App() {
   });
   const [captureMermaidModal, setCaptureMermaidModal] = useState("");
   const [focusedFindingExchangeId, setFocusedFindingExchangeId] = useState("");
+  const storedOpenAiSettings = getStoredJson(OPENAI_SETTINGS_KEY, {});
+  const [openAiKey, setOpenAiKey] = useState("");
+  const [openAiModel, setOpenAiModel] = useState(storedOpenAiSettings?.model || "gpt-4.1-mini");
+  const [openAiPrompt, setOpenAiPrompt] = useState(
+    storedOpenAiSettings?.prompt || DEFAULT_OPENAI_SUMMARY_PROMPT
+  );
+  const [aiSummary, setAiSummary] = useState("");
+  const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
+  const [aiSummaryError, setAiSummaryError] = useState("");
+  const [sqlmapForm, setSqlmapForm] = useState({
+    url: "",
+    method: "GET",
+    data: "",
+    headers: "",
+    level: "1",
+    risk: "1"
+  });
+  const [sqlmapLoading, setSqlmapLoading] = useState(false);
+  const [sqlmapResult, setSqlmapResult] = useState(null);
+  const [sqlmapError, setSqlmapError] = useState("");
   const mergedHarHistory = [
     ...localHarHistory.map((item) => ({ ...item, historySource: "local" })),
     ...recentHarAnalyses
@@ -2360,6 +2408,14 @@ export default function App() {
               Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
             );
           }
+
+          if (data.stopReason === "crawl-complete") {
+            await requestOpenAiSummary({
+              targetUrl: data.targetUrl,
+              exchanges: data.exchanges || [],
+              errors: data.errors || []
+            });
+          }
         }
 
         const persistedDomain = getStoredValue("http-analyzer-domain");
@@ -2384,7 +2440,7 @@ export default function App() {
     const timer = window.setInterval(syncCaptureStatus, 1000);
 
     return () => window.clearInterval(timer);
-  }, [readOnlyDeployment]);
+  }, [readOnlyDeployment, openAiKey, openAiModel, openAiPrompt]);
 
   useEffect(() => {
     const loadRecentAnalyses = async () => {
@@ -2535,6 +2591,16 @@ export default function App() {
   }, [activeSection]);
 
   useEffect(() => {
+    setStoredValue(
+      OPENAI_SETTINGS_KEY,
+      JSON.stringify({
+        model: openAiModel,
+        prompt: openAiPrompt
+      })
+    );
+  }, [openAiModel, openAiPrompt]);
+
+  useEffect(() => {
     setStoredValue("http-analyzer-sidebar-collapsed", String(sidebarCollapsed));
   }, [sidebarCollapsed]);
 
@@ -2575,6 +2641,79 @@ export default function App() {
       JSON.stringify(sessionSuppressedFindings)
     );
   }, [sessionSuppressedFindings]);
+
+  async function requestOpenAiSummary(captureInput) {
+    if (!openAiKey.trim()) {
+      setAiSummaryError("OpenAI API Key가 없어 Summary를 생성하지 않았습니다.");
+      return;
+    }
+
+    setAiSummaryLoading(true);
+    setAiSummaryError("");
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/openai/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          apiKey: openAiKey.trim(),
+          model: openAiModel.trim() || "gpt-4.1-mini",
+          prompt: openAiPrompt,
+          capture: captureInput
+        })
+      });
+      const { data, rawText } = await readJsonSafely(response);
+
+      if (!response.ok) {
+        throw new Error(data?.error || rawText || "OpenAI Summary 생성에 실패했습니다.");
+      }
+
+      setAiSummary(data?.summary || "(empty summary)");
+    } catch (error) {
+      setAiSummaryError(error instanceof Error ? error.message : "OpenAI Summary 생성에 실패했습니다.");
+    } finally {
+      setAiSummaryLoading(false);
+    }
+  }
+
+  async function runSqlmapScan(event) {
+    event.preventDefault();
+    setSqlmapLoading(true);
+    setSqlmapError("");
+    setSqlmapResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/sqlmap/scan`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(sqlmapForm)
+      });
+      const { data, rawText } = await readJsonSafely(response);
+
+      if (!response.ok) {
+        throw new Error(data?.error || data?.installHint || rawText || "SQLMap scan failed.");
+      }
+
+      setSqlmapResult(data);
+    } catch (error) {
+      setSqlmapError(error instanceof Error ? error.message : "SQLMap scan failed.");
+    } finally {
+      setSqlmapLoading(false);
+    }
+  }
+
+  function loadSqlmapFromExchange(exchange) {
+    setSqlmapForm({
+      url: exchange.request?.url || exchange.response?.url || "",
+      method: exchange.request?.method || "GET",
+      data: exchange.request?.postData || "",
+      headers: Object.entries(exchange.request?.headers || {})
+        .map(([key, value]) => `${key}: ${String(value)}`)
+        .join("\n"),
+      level: sqlmapForm.level,
+      risk: sqlmapForm.risk
+    });
+  }
 
   async function startCapture(event) {
     event.preventDefault();
@@ -3426,8 +3565,22 @@ window.addEventListener("load", () => {
       label: "Recent Data",
       description: "최근 저장된 캡처 기록",
       count: mergedCaptureEvents.length + mergedInspectionRuns.length
+    },
+    {
+      key: "sqlmap",
+      icon: "sqlmap",
+      label: "SQLMap",
+      description: "SQL Injection 자동 점검",
+      count: sqlmapResult ? 1 : 0
+    },
+    {
+      key: "settings",
+      icon: "settings",
+      label: "Settings",
+      description: "OpenAI Summary 설정",
+      count: openAiKey ? 1 : 0
     }
-  ].filter((item) => !readOnlyDeployment || !["capture", "har"].includes(item.key));
+  ].filter((item) => !readOnlyDeployment || !["capture", "har", "sqlmap"].includes(item.key));
 
   function navigateToSection(sectionKey) {
     if (sectionKey !== "findings") {
@@ -3740,7 +3893,9 @@ window.addEventListener("load", () => {
             ) : activeSection === "overview" ||
               activeSection === "findings" ||
               activeSection === "har" ||
-              activeSection === "recent" ? null : (
+              activeSection === "recent" ||
+              activeSection === "sqlmap" ||
+              activeSection === "settings" ? null : (
               <div className={`section-intro ${activeSection === "findings" ? "findings-intro" : ""}`}>
                 <h2 className="section-title">
                   {navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}
@@ -4060,6 +4215,192 @@ window.addEventListener("load", () => {
                       ))
                     )}
                   </div>
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "sqlmap" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="tool-panel section-panel">
+                  <strong>SQLMap Injection Scan</strong>
+                  <p className="tool-copy">
+                    허가된 대상에 대해서만 SQL Injection 가능성을 점검하세요. 서버에 `sqlmap`이 설치되어 있어야 실행됩니다.
+                  </p>
+                  <form className="tool-form" onSubmit={runSqlmapScan}>
+                    <label className="field-label field-card">
+                      <span>Target URL</span>
+                      <input
+                        type="text"
+                        placeholder="https://target.example/api?id=1"
+                        value={sqlmapForm.url}
+                        onChange={(event) =>
+                          setSqlmapForm((current) => ({ ...current, url: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <div className="tool-grid-3">
+                      <label className="field-label field-card">
+                        <span>Method</span>
+                        <select
+                          value={sqlmapForm.method}
+                          onChange={(event) =>
+                            setSqlmapForm((current) => ({ ...current, method: event.target.value }))
+                          }
+                        >
+                          <option value="GET">GET</option>
+                          <option value="POST">POST</option>
+                          <option value="PUT">PUT</option>
+                          <option value="PATCH">PATCH</option>
+                        </select>
+                      </label>
+                      <label className="field-label field-card">
+                        <span>Level</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="5"
+                          value={sqlmapForm.level}
+                          onChange={(event) =>
+                            setSqlmapForm((current) => ({ ...current, level: event.target.value }))
+                          }
+                        />
+                      </label>
+                      <label className="field-label field-card">
+                        <span>Risk</span>
+                        <input
+                          type="number"
+                          min="1"
+                          max="3"
+                          value={sqlmapForm.risk}
+                          onChange={(event) =>
+                            setSqlmapForm((current) => ({ ...current, risk: event.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <label className="field-label field-card">
+                      <span>Headers</span>
+                      <textarea
+                        rows={5}
+                        placeholder={'Cookie: SESSIONID=...\nAuthorization: Bearer ...'}
+                        value={sqlmapForm.headers}
+                        onChange={(event) =>
+                          setSqlmapForm((current) => ({ ...current, headers: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <label className="field-label field-card">
+                      <span>Body / Data</span>
+                      <textarea
+                        rows={5}
+                        placeholder="id=1&name=test"
+                        value={sqlmapForm.data}
+                        onChange={(event) =>
+                          setSqlmapForm((current) => ({ ...current, data: event.target.value }))
+                        }
+                      />
+                    </label>
+                    <div className="action-row">
+                      <button type="submit" disabled={sqlmapLoading || !sqlmapForm.url.trim()}>
+                        {sqlmapLoading ? "SQLMap 실행 중..." : "SQLMap Scan"}
+                      </button>
+                    </div>
+                  </form>
+                  {sqlmapError ? <div className="error-strip">{sqlmapError}</div> : null}
+                  {visibleExchanges.length > 0 ? (
+                    <div className="candidate-list">
+                      <strong>Captured Candidates</strong>
+                      {visibleExchanges.slice(0, 12).map((exchange) => (
+                        <button
+                          key={exchange.id}
+                          type="button"
+                          className="candidate-row"
+                          onClick={() => loadSqlmapFromExchange(exchange)}
+                        >
+                          <span>{exchange.request?.method || "GET"}</span>
+                          <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {sqlmapResult ? (
+                    <div className="tool-result">
+                      <strong>SQLMap Result</strong>
+                      <span>
+                        {formatDateTime(sqlmapResult.startedAt)} ~ {formatDateTime(sqlmapResult.endedAt)}
+                      </span>
+                      <pre>{[sqlmapResult.stdout, sqlmapResult.stderr].filter(Boolean).join("\n\n")}</pre>
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "settings" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="tool-panel section-panel">
+                  <strong>OpenAI Summary Settings</strong>
+                  <p className="tool-copy">
+                    크롤링이 `crawl-complete`로 끝나면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 브라우저 상태에만 보관하고 서버에 저장하지 않습니다.
+                  </p>
+                  <div className="tool-grid-2">
+                    <label className="field-label field-card">
+                      <span>OPENAI KEY</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        placeholder="sk-..."
+                        value={openAiKey}
+                        onChange={(event) => setOpenAiKey(event.target.value)}
+                      />
+                    </label>
+                    <label className="field-label field-card">
+                      <span>MODEL</span>
+                      <input
+                        type="text"
+                        placeholder="gpt-4.1-mini"
+                        value={openAiModel}
+                        onChange={(event) => setOpenAiModel(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <label className="field-label field-card">
+                    <span>PROMPT</span>
+                    <textarea
+                      rows={12}
+                      value={openAiPrompt}
+                      onChange={(event) => setOpenAiPrompt(event.target.value)}
+                    />
+                  </label>
+                  <div className="action-row">
+                    <button
+                      type="button"
+                      disabled={aiSummaryLoading || !openAiKey.trim()}
+                      onClick={() =>
+                        requestOpenAiSummary({
+                          targetUrl: domain || "",
+                          exchanges: analyzedExchanges,
+                          errors
+                        })
+                      }
+                    >
+                      {aiSummaryLoading ? "Summary 생성 중..." : "현재 데이터로 Summary 생성"}
+                    </button>
+                    <button type="button" onClick={() => setOpenAiPrompt(DEFAULT_OPENAI_SUMMARY_PROMPT)}>
+                      기본 프롬프트 복원
+                    </button>
+                  </div>
+                  {aiSummaryError ? <div className="error-strip">{aiSummaryError}</div> : null}
+                  {aiSummary ? (
+                    <div className="tool-result">
+                      <strong>OpenAI Summary</strong>
+                      <pre>{aiSummary}</pre>
+                    </div>
+                  ) : null}
                 </div>
               </article>
             </section>

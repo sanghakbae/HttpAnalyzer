@@ -15,6 +15,8 @@
 - 실시간 HTTP 요청/응답 캡처
 - Playwright 브라우저 기반 같은 도메인 크롤링 캡처
 - 크롤링 완료 또는 idle 상태 감지 시 자동 캡처 중지
+- SQLMap 기반 SQL Injection 후보 엔드포인트 점검 메뉴
+- OpenAI API 기반 크롤링 완료 Summary 생성
 - 요청/응답 헤더 및 바디 확인
 - 특정 요청 재전송(Replay)
 - 캡처 흐름 기반 Mermaid 다이어그램 생성
@@ -101,6 +103,7 @@
 - Python 3.9+
 - `mitmproxy`
 - Supabase 프로젝트
+- SQLMap(Optional, 로컬 Injection 점검 시 필요)
 
 ## 빠른 시작
 
@@ -126,6 +129,8 @@ VITE_SUPABASE_ANON_KEY=<publishable-or-anon-key>
 PORT=4000
 HOST=127.0.0.1
 DISABLE_CAPTURE=false
+DISABLE_SQLMAP=false
+SQLMAP_BIN=sqlmap
 PLAYWRIGHT_HEADLESS=true
 CAPTURE_READY_DELAY_MS=3000
 CAPTURE_IDLE_AUTO_STOP_MS=10000
@@ -149,6 +154,10 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
   로컬은 보통 `127.0.0.1`, Render 같은 배포 환경은 `0.0.0.0`을 사용합니다.
 - `DISABLE_CAPTURE`
   배포 백엔드에서 Playwright 캡처 API를 막고 저장/조회 API만 운영하려면 `true`로 둡니다.
+- `DISABLE_SQLMAP`
+  SQLMap 실행 API를 막을지 결정합니다. 공개 배포 환경에서는 악용 방지를 위해 `true`를 권장합니다.
+- `SQLMAP_BIN`
+  로컬에 설치된 SQLMap 실행 파일 경로입니다. 기본값은 `sqlmap`입니다.
 - `CAPTURE_READY_DELAY_MS`
   첫 페이지 로드 후 캡처 준비를 위해 대기하는 시간입니다. 기본값은 `3000`입니다.
 - `CAPTURE_IDLE_AUTO_STOP_MS`
@@ -250,6 +259,47 @@ npm run dev
 - 결과는 본문이 아니라 전용 팝업으로 표시됩니다.
 - 팝업 우측 상단 `복사` 버튼으로 Mermaid 코드를 바로 복사할 수 있습니다.
 - 복사 후 팝업은 자동으로 닫힙니다.
+
+### SQLMap Injection Scan
+
+`SQLMap` 메뉴는 캡처된 요청 중 SQL Injection 점검 후보를 골라 `sqlmap`으로 실행할 수 있는 로컬 점검 도구입니다.
+
+사용 흐름:
+
+1. `Capture` 또는 `Recent Data`에서 요청을 확보합니다.
+2. `SQLMap` 메뉴로 이동합니다.
+3. `Captured Candidates`에서 요청을 선택하면 URL, Method, Headers, Body가 자동 입력됩니다.
+4. 필요하면 `Level`, `Risk`, Header, Body 값을 조정합니다.
+5. `SQLMap Scan`을 눌러 결과를 확인합니다.
+
+주의:
+
+- 반드시 본인 소유 또는 명시적으로 허가받은 대상에만 사용해야 합니다.
+- 로컬 서버에서 `sqlmap` 바이너리를 실행하므로 로컬에 SQLMap이 설치되어 있어야 합니다.
+- macOS Homebrew 기준 설치 예시는 `brew install sqlmap`입니다.
+- 공개 Render 백엔드에서는 `DISABLE_SQLMAP=true`로 차단합니다.
+- 배포 환경에서 SQLMap을 열어두면 임의 외부 대상 스캔에 악용될 수 있으므로 권장하지 않습니다.
+
+### OpenAI Summary Settings
+
+`Settings` 메뉴에서 크롤링 완료 후 자동 생성할 Summary 설정을 관리합니다.
+
+입력 항목:
+
+- `OPENAI KEY`: OpenAI API Key입니다. 서버 DB에는 저장하지 않고 현재 브라우저 상태에서만 사용합니다.
+- `MODEL`: Summary 생성에 사용할 모델명입니다. 기본값은 `gpt-4.1-mini`입니다.
+- `PROMPT`: HTTP 캡처 결과를 어떤 관점으로 요약할지 정하는 프롬프트입니다.
+
+기본 프롬프트는 다음 관점을 포함합니다.
+
+- 전체 요약
+- 위험도 우선 엔드포인트
+- SQL Injection, XSS, 인증/세션, CORS, 민감정보 노출 근거
+- 캡처 데이터 기반 증거와 추가 확인 필요 항목 분리
+- SQLMap 점검 후보 URL/파라미터 제안
+- 개발자 다음 조치 체크리스트
+
+크롤링이 `crawl-complete`로 자동 중지되면, API Key가 입력된 경우 현재 캡처 데이터를 기반으로 Summary가 생성됩니다. 수동으로는 `현재 데이터로 Summary 생성` 버튼을 사용할 수 있습니다.
 
 ### HAR 분석
 
@@ -412,6 +462,7 @@ NODE_ENV=production
 HOST=0.0.0.0
 DISABLE_CAPTURE=false
 PLAYWRIGHT_HEADLESS=true
+DISABLE_SQLMAP=true
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 ```
@@ -420,6 +471,7 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 
 - 동작: `/api/health`, `/api/capture/start`, `/api/capture/status`, `/api/capture/stop`, `/api/replay-request`, `/api/recent-analyses`, `/api/inspection-runs`, `/api/capture-events/batch`, `/api/analyze-har`
 - Render에서는 `PLAYWRIGHT_HEADLESS=true`로 서버 내부 headless Chromium을 실행합니다.
+- Render에서는 SQLMap API를 기본 차단합니다. `render.yaml`의 `DISABLE_SQLMAP=true`는 의도된 보안 설정입니다.
 
 주의: Render에서 실행되는 브라우저는 사용자 PC가 아니라 Render 서버 내부 브라우저입니다. 사람이 직접 로그인하고 조작하는 세션 캡처는 로컬 앱에서 실행하는 것이 가장 정확합니다.
 

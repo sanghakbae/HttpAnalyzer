@@ -1,4 +1,5 @@
 import cors from "cors";
+import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import express from "express";
@@ -8,6 +9,7 @@ import path from "path";
 import { createClient } from "@supabase/supabase-js";
 import { chromium } from "playwright";
 import { fileURLToPath } from "url";
+import { promisify } from "util";
 
 dotenv.config();
 
@@ -16,6 +18,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const proxyRulesPath = path.resolve(__dirname, "../proxy/rules.json");
+const execFileAsync = promisify(execFile);
 
 app.use(cors());
 app.use(express.json({ limit: "4mb" }));
@@ -31,6 +34,8 @@ const captureCrawlEnabled = process.env.CAPTURE_CRAWL_ENABLED !== "false";
 const captureCrawlMaxPages = Number(process.env.CAPTURE_CRAWL_MAX_PAGES || 8);
 const captureCrawlPageDelayMs = Number(process.env.CAPTURE_CRAWL_PAGE_DELAY_MS || 1500);
 const captureLoginWaitMs = Number(process.env.CAPTURE_LOGIN_WAIT_MS || 3000);
+const sqlmapBin = process.env.SQLMAP_BIN || "sqlmap";
+const disableSqlmap = process.env.DISABLE_SQLMAP === "true" || Boolean(process.env.RENDER);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -474,6 +479,77 @@ function filterReplayHeaders(headers) {
   return Object.fromEntries(
     Object.entries(headers || {}).filter(([key]) => !blocked.has(String(key).toLowerCase()))
   );
+}
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function validateHttpUrl(value) {
+  const url = new URL(value);
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error("Only http/https URLs are supported.");
+  }
+
+  return url.toString();
+}
+
+function normalizeScanHeaders(input) {
+  if (!input) {
+    return [];
+  }
+
+  if (typeof input === "string") {
+    return input
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter((line) => line.includes(":"))
+      .slice(0, 20);
+  }
+
+  if (typeof input === "object") {
+    return Object.entries(input)
+      .slice(0, 20)
+      .map(([key, value]) => `${key}: ${String(value)}`);
+  }
+
+  return [];
+}
+
+function buildCaptureSummaryPayload(capture) {
+  const exchanges = Array.isArray(capture?.exchanges) ? capture.exchanges : [];
+  const errors = Array.isArray(capture?.errors) ? capture.errors : [];
+
+  return {
+    targetUrl: capture?.targetUrl || "",
+    capturedAt: new Date().toISOString(),
+    totals: {
+      exchanges: exchanges.length,
+      errors: errors.length
+    },
+    exchanges: exchanges.slice(0, 30).map((exchange) => ({
+      request: {
+        method: exchange.request?.method || "",
+        url: exchange.request?.url || "",
+        resourceType: exchange.request?.resourceType || "",
+        headers: exchange.request?.headers || {},
+        bodyPreview: String(exchange.request?.postData || "").slice(0, 1200)
+      },
+      response: {
+        status: exchange.response?.status || null,
+        statusText: exchange.response?.statusText || "",
+        url: exchange.response?.url || "",
+        headers: exchange.response?.headers || {},
+        bodyPreview: String(exchange.response?.bodyPreview || "").slice(0, 1200)
+      }
+    })),
+    errors: errors.slice(0, 20)
+  };
 }
 
 async function saveAnalysisRecord(payload) {
@@ -995,7 +1071,9 @@ app.get("/api/health", (_request, response) => {
     captureCrawlEnabled,
     captureCrawlMaxPages,
     captureCrawlPageDelayMs,
-    captureLoginWaitMs
+    captureLoginWaitMs,
+    sqlmapDisabled: disableSqlmap,
+    sqlmapBin
   });
 });
 
@@ -1110,6 +1188,148 @@ app.post("/api/replay-request", async (request, response) => {
   } catch (error) {
     response.status(400).json({
       error: error instanceof Error ? error.message : "Failed to replay request"
+    });
+  }
+});
+
+app.post("/api/sqlmap/scan", async (request, response) => {
+  if (disableSqlmap) {
+    response.status(403).json({ error: "SQLMap scanning is disabled on this backend." });
+    return;
+  }
+
+  const payload = request.body ?? {};
+
+  try {
+    const targetUrl = validateHttpUrl(payload.url);
+    const method = String(payload.method || "GET").toUpperCase();
+    const level = clampNumber(payload.level, 1, 5, 1);
+    const risk = clampNumber(payload.risk, 1, 3, 1);
+    const data = String(payload.data || "");
+    const headers = normalizeScanHeaders(payload.headers);
+    const args = [
+      "-u",
+      targetUrl,
+      "--batch",
+      "--level",
+      String(level),
+      "--risk",
+      String(risk),
+      "--timeout",
+      "10",
+      "--retries",
+      "1"
+    ];
+
+    if (method && method !== "GET") {
+      args.push("--method", method);
+    }
+
+    if (data) {
+      args.push("--data", data);
+    }
+
+    for (const header of headers) {
+      args.push("-H", header);
+    }
+
+    const startedAt = new Date().toISOString();
+    const { stdout, stderr } = await execFileAsync(sqlmapBin, args, {
+      timeout: 180000,
+      maxBuffer: 1024 * 1024 * 3
+    });
+
+    response.json({
+      ok: true,
+      command: sqlmapBin,
+      args,
+      startedAt,
+      endedAt: new Date().toISOString(),
+      stdout: stdout.slice(-120000),
+      stderr: stderr.slice(-20000)
+    });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      response.status(501).json({
+        error: "sqlmap is not installed or not found in PATH.",
+        installHint: "Install sqlmap locally or set SQLMAP_BIN to the sqlmap executable path."
+      });
+      return;
+    }
+
+    response.status(400).json({
+      error: error instanceof Error ? error.message : "SQLMap scan failed",
+      stdout: error?.stdout ? String(error.stdout).slice(-120000) : "",
+      stderr: error?.stderr ? String(error.stderr).slice(-20000) : ""
+    });
+  }
+});
+
+app.post("/api/openai/summary", async (request, response) => {
+  const { apiKey, model, prompt, capture } = request.body ?? {};
+  const key = String(apiKey || "").trim();
+  const selectedModel = String(model || "gpt-4.1-mini").trim();
+  const userPrompt = String(prompt || "").trim();
+
+  if (!key) {
+    response.status(400).json({ error: "OpenAI API key is required." });
+    return;
+  }
+
+  if (!userPrompt) {
+    response.status(400).json({ error: "Prompt is required." });
+    return;
+  }
+
+  try {
+    const capturePayload = buildCaptureSummaryPayload(capture);
+    const openaiResponse = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${key}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        model: selectedModel,
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a senior web security analyst. Summarize HTTP capture data clearly, prioritize exploitable risks, and avoid inventing evidence."
+          },
+          {
+            role: "user",
+            content: `${userPrompt}\n\nHTTP_CAPTURE_JSON:\n${JSON.stringify(capturePayload, null, 2)}`
+          }
+        ],
+        temperature: 0.2
+      })
+    });
+
+    const rawText = await openaiResponse.text();
+    let data = {};
+    try {
+      data = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      data = { rawText };
+    }
+
+    if (!openaiResponse.ok) {
+      response.status(openaiResponse.status).json({
+        error: data?.error?.message || rawText || "OpenAI summary request failed."
+      });
+      return;
+    }
+
+    response.json({
+      ok: true,
+      model: selectedModel,
+      summary: data?.choices?.[0]?.message?.content || "",
+      usage: data?.usage || null
+    });
+  } catch (error) {
+    response.status(400).json({
+      error: error instanceof Error ? error.message : "OpenAI summary request failed."
     });
   }
 });

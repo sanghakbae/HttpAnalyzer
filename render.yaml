@@ -29,6 +29,8 @@ services:
         value: "1500"
       - key: CAPTURE_LOGIN_WAIT_MS
         value: "3000"
+      - key: DISABLE_SQLMAP
+        value: "true"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
