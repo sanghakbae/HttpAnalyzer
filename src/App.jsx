@@ -4857,6 +4857,11 @@ window.addEventListener("load", () => {
     }
 
     setActiveSection(sectionKey);
+
+    if (sectionKey === "recent") {
+      setRecentLoading(true);
+      refreshRecentAnalysesOnce().finally(() => setRecentLoading(false));
+    }
   }
 
   useEffect(() => {
