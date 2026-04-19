@@ -3,7 +3,7 @@ services:
     name: http-analyzer-api
     runtime: node
     plan: free
-    buildCommand: npm ci && npx playwright install chromium
+    buildCommand: npm ci && npx playwright install chromium chromium-headless-shell
     startCommand: npm run start
     healthCheckPath: /api/health
     envVars:

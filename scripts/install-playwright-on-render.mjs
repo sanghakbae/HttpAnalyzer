@@ -4,7 +4,7 @@ if (!process.env.RENDER && process.env.PLAYWRIGHT_INSTALL_BROWSER !== "true") {
   process.exit(0);
 }
 
-const result = spawnSync("npx", ["playwright", "install", "chromium"], {
+const result = spawnSync("npx", ["playwright", "install", "chromium", "chromium-headless-shell"], {
   stdio: "inherit",
   shell: process.platform === "win32"
 });
