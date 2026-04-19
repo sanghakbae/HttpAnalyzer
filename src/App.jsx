@@ -3748,7 +3748,17 @@ window.addEventListener("load", () => {
               </div>
             )}
 
-            {statusMessage ? <p className="status">{statusMessage}</p> : null}
+            {statusMessage ? (
+              <p
+                className={`status ${
+                  statusMessage === "크롤링이 완료되어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다."
+                    ? "auto-stop-status"
+                    : ""
+                }`}
+              >
+                {statusMessage}
+              </p>
+            ) : null}
             {visibleErrors.length > 0 ? (
               <div className="error-strip">{visibleErrors[visibleErrors.length - 1]?.errorText}</div>
             ) : null}
