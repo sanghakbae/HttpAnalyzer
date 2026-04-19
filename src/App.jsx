@@ -3466,7 +3466,10 @@ window.addEventListener("load", () => {
         <aside className="sidebar-card">
           <div className="sidebar-brand">
             <div className="sidebar-brand-row">
-              <h1 className="page-title sidebar-title">HTTP Analyzer</h1>
+              <div>
+                <h1 className="page-title sidebar-title">HTTP Analyzer</h1>
+                <p className="sidebar-subtitle">TECHNICAL ANALYZER</p>
+              </div>
               <button
                 type="button"
                 className="sidebar-toggle-button"
@@ -3547,10 +3550,11 @@ window.addEventListener("load", () => {
         <div className="content-shell">
           <section className="hero-card filter-shell">
             <div className="topbar">
-              <div>
-                <p className="eyebrow">Operations Overview</p>
-                <h1 className="page-title">HTTP Analyzer</h1>
+              <div className="workspace-search">
+                <span aria-hidden="true">⌕</span>
+                <input type="search" placeholder="Search sessions..." />
               </div>
+              <h1 className="workspace-title">Network / Overview</h1>
               <div className="topbar-badges">
                 <div className="login-user-copy">
                   {authUser.picture ? (
@@ -3918,15 +3922,19 @@ window.addEventListener("load", () => {
             <section className="pair-list">
               <article className="panel stacked-panel">
                 <div className="stats-dashboard">
-                  {periodStats.map((item) => (
-                    <div key={item.key} className="stats-card">
-                      <strong>{item.label}</strong>
-                      <span>점검 {item.runCount}회</span>
-                      <span>요청 {item.totalExchanges}건</span>
-                      <span>Finding {item.totalFindings}건</span>
-                      <span>Critical {item.criticalFindings} / High {item.highFindings}</span>
-                    </div>
-                  ))}
+                  {periodStats
+                    .filter((item) => item.key === "30d")
+                    .map((item) => (
+                      <div key={item.key} className="stats-card stats-card-inline">
+                        <strong>{item.label}</strong>
+                        <div className="stats-inline-row">
+                          <span>점검 {item.runCount}회</span>
+                          <span>요청 {item.totalExchanges}건</span>
+                          <span>Finding {item.totalFindings}건</span>
+                          <span>Critical {item.criticalFindings} / High {item.highFindings}</span>
+                        </div>
+                      </div>
+                    ))}
                 </div>
                 <div className="recent-capture-panel section-panel">
                   <strong>Recent Inspection Runs</strong>
