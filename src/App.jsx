@@ -2094,6 +2094,15 @@ export default function App() {
   const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
   const [recentInspectionRuns, setRecentInspectionRuns] = useState([]);
   const [recentLoading, setRecentLoading] = useState(false);
+  const [backendHealth, setBackendHealth] = useState({
+    checkedAt: "",
+    checking: true,
+    ok: false,
+    error: "",
+    service: "",
+    supabaseConfigured: false,
+    captureDisabled: null
+  });
   const [captureMermaidModal, setCaptureMermaidModal] = useState("");
   const [focusedFindingExchangeId, setFocusedFindingExchangeId] = useState("");
   const mergedHarHistory = [
@@ -2222,6 +2231,56 @@ export default function App() {
       window.localStorage.removeItem(AUTH_STORAGE_KEY);
     }
   }, [authUser]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const checkBackendHealth = async () => {
+      setBackendHealth((current) => ({ ...current, checking: true }));
+
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/health`);
+        const data = await response.json().catch(() => ({}));
+
+        if (cancelled) {
+          return;
+        }
+
+        setBackendHealth({
+          checkedAt: new Date().toISOString(),
+          checking: false,
+          ok: response.ok && Boolean(data.ok),
+          error: response.ok ? "" : data?.error || `HTTP ${response.status}`,
+          service: data?.service || "http-analyzer-api",
+          supabaseConfigured: Boolean(data?.supabaseConfigured),
+          captureDisabled:
+            typeof data?.captureDisabled === "boolean" ? data.captureDisabled : null
+        });
+      } catch (error) {
+        if (cancelled) {
+          return;
+        }
+
+        setBackendHealth({
+          checkedAt: new Date().toISOString(),
+          checking: false,
+          ok: false,
+          error: error instanceof Error ? error.message : "Backend health check failed",
+          service: "",
+          supabaseConfigured: false,
+          captureDisabled: null
+        });
+      }
+    };
+
+    checkBackendHealth();
+    const timer = window.setInterval(checkBackendHealth, 30000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, []);
 
   useEffect(() => {
     if (readOnlyDeployment) {
@@ -3317,6 +3376,32 @@ window.addEventListener("load", () => {
               </button>
             ))}
           </nav>
+          <div className={`backend-status-card ${backendHealth.ok ? "online" : "offline"}`}>
+            <div className="backend-status-topline">
+              <span className="backend-status-dot" />
+              <strong>Backend</strong>
+              <span>{backendHealth.checking ? "checking" : backendHealth.ok ? "online" : "offline"}</span>
+            </div>
+            <div className="backend-status-body">
+              <span>API: {API_BASE_URL.replace(/^https?:\/\//, "")}</span>
+              <span>
+                Capture:{" "}
+                {backendHealth.captureDisabled === null
+                  ? "-"
+                  : backendHealth.captureDisabled
+                    ? "disabled"
+                    : "enabled"}
+              </span>
+              <span>DB: {backendHealth.supabaseConfigured ? "connected" : "not set"}</span>
+              <span>
+                Last:{" "}
+                {backendHealth.checkedAt
+                  ? new Date(backendHealth.checkedAt).toLocaleTimeString()
+                  : "-"}
+              </span>
+              {backendHealth.error ? <span className="backend-status-error">{backendHealth.error}</span> : null}
+            </div>
+          </div>
         </aside>
 
         <div className="content-shell">

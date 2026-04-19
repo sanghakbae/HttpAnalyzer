@@ -218,6 +218,87 @@ input {
   font-weight: 800;
 }
 
+.backend-status-card {
+  margin-top: auto;
+  display: grid;
+  gap: 10px;
+  padding: 13px;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  background:
+    radial-gradient(circle at 20% 0%, rgba(159, 227, 185, 0.12), transparent 38%),
+    linear-gradient(180deg, rgba(25, 33, 48, 0.98), rgba(15, 23, 42, 0.98));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    0 12px 28px rgba(0, 0, 0, 0.18);
+  min-width: 0;
+}
+
+.backend-status-card.offline {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(248, 113, 113, 0.14), transparent 38%),
+    linear-gradient(180deg, rgba(39, 29, 35, 0.98), rgba(25, 22, 31, 0.98));
+}
+
+.backend-status-topline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.backend-status-topline strong {
+  color: #f8fafc;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.backend-status-topline span:last-child {
+  margin-left: auto;
+  color: #9fe3b9;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.backend-status-card.offline .backend-status-topline span:last-child {
+  color: #fca5a5;
+}
+
+.backend-status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  background: #34d399;
+  box-shadow: 0 0 0 5px rgba(52, 211, 153, 0.14);
+  flex: 0 0 auto;
+}
+
+.backend-status-card.offline .backend-status-dot {
+  background: #f87171;
+  box-shadow: 0 0 0 5px rgba(248, 113, 113, 0.14);
+}
+
+.backend-status-body {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.backend-status-body span {
+  overflow: hidden;
+  color: #b6c2d6;
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backend-status-body .backend-status-error {
+  color: #fecaca;
+}
+
 .findings-intro .section-title,
 .findings-intro .section-copy {
   color: #111111;
@@ -1231,7 +1312,10 @@ button:disabled {
 
 .app-layout.sidebar-collapsed .sidebar-brand .page-title,
 .app-layout.sidebar-collapsed .sidebar-nav-description,
-.app-layout.sidebar-collapsed .sidebar-nav-count {
+.app-layout.sidebar-collapsed .sidebar-nav-count,
+.app-layout.sidebar-collapsed .backend-status-body,
+.app-layout.sidebar-collapsed .backend-status-topline strong,
+.app-layout.sidebar-collapsed .backend-status-topline span:last-child {
   display: none;
 }
 
@@ -1262,6 +1346,11 @@ button:disabled {
 .app-layout.sidebar-collapsed .sidebar-nav-icon svg {
   width: 18px;
   height: 18px;
+}
+
+.app-layout.sidebar-collapsed .backend-status-card {
+  justify-items: center;
+  padding: 12px;
 }
 
 .inspection-modal-shell {
