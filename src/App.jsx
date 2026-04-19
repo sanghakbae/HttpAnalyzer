@@ -655,6 +655,49 @@ function buildFindingSignature(finding, exchange) {
   return `${normalizeEndpoint(exchange.request?.url || exchange.response?.url)}::${finding.key}`;
 }
 
+function normalizeStoredFinding(finding) {
+  if (!finding?.key) {
+    return null;
+  }
+
+  const severity = finding.severity || "low";
+  const owasp = finding.owasp || "Unmapped";
+  const confidence = finding.confidence || "medium";
+
+  return {
+    ...finding,
+    severity,
+    severityLabel: finding.severityLabel || SEVERITY_LABELS[severity] || severity,
+    owasp,
+    owaspLabel: finding.owaspLabel || OWASP_LABELS[owasp] || owasp,
+    confidence,
+    confidenceLabel: finding.confidenceLabel || getConfidenceLabel(confidence),
+    checklist: Array.isArray(finding.checklist) ? finding.checklist : []
+  };
+}
+
+function mergeSecurityFindings(storedFindings, detectedFindings, exchange) {
+  const merged = [];
+  const seen = new Set();
+
+  for (const finding of [...(storedFindings || []), ...(detectedFindings || [])]) {
+    const normalized = normalizeStoredFinding(finding);
+    if (!normalized) {
+      continue;
+    }
+
+    const signature = buildFindingSignature(normalized, exchange);
+    if (seen.has(signature)) {
+      continue;
+    }
+
+    seen.add(signature);
+    merged.push(normalized);
+  }
+
+  return merged;
+}
+
 function getHostFromUrl(input) {
   if (!input) {
     return "";
@@ -2819,10 +2862,11 @@ export default function App() {
       scopedExchanges.map((exchange) => ({
         ...exchange,
         endpointKey: normalizeEndpoint(exchange.request?.url || exchange.response?.url),
-        securityFindings: analyzeSecurityFindings(exchange).filter(
-          (finding) =>
-            !suppressionRules.some((rule) => matchesSuppressionRule(rule, finding, exchange))
-        )
+        securityFindings: mergeSecurityFindings(
+          exchange.securityFindings,
+          analyzeSecurityFindings(exchange),
+          exchange
+        ).filter((finding) => !suppressionRules.some((rule) => matchesSuppressionRule(rule, finding, exchange)))
       })),
     [scopedExchanges, suppressionRules]
   );
