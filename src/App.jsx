@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import mermaid from "mermaid";
 import { supabase } from "./lib/supabase";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
@@ -50,6 +51,7 @@ const DEFAULT_OPENAI_SUMMARY_PROMPT = `다음 HTTP 캡처 결과를 한국어로
 4. 실제 캡처 데이터에서 확인되는 증거만 사용하고 추측은 "추가 확인 필요"로 표시
 5. SQLMap으로 점검할 후보 URL과 파라미터를 제안
 6. 개발자가 바로 수행할 다음 조치 체크리스트를 작성`;
+const CHUNK_RELOAD_STORAGE_KEY = "http-analyzer-chunk-reload-attempted";
 
 const SEVERITY_LABELS = {
   critical: "Critical",
@@ -271,6 +273,16 @@ function NavigationIcon({ name }) {
           <path d="M9 14h6" />
         </svg>
       );
+    case "api":
+      return (
+        <svg {...commonProps}>
+          <path d="M4 7h16" />
+          <path d="M4 12h16" />
+          <path d="M4 17h16" />
+          <path d="M8 7v10" />
+          <path d="M16 7v10" />
+        </svg>
+      );
     case "settings":
       return (
         <svg {...commonProps}>
@@ -318,6 +330,15 @@ function getStoredJson(key, fallback = null) {
   } catch {
     return fallback;
   }
+}
+
+function isDynamicImportError(reason) {
+  const message = String(reason?.message || reason || "");
+  return (
+    message.includes("Failed to fetch dynamically imported module") ||
+    message.includes("Importing a module script failed") ||
+    message.includes("error loading dynamically imported module")
+  );
 }
 
 function normalizeHeaderValue(value) {
@@ -469,6 +490,57 @@ function normalizeEndpoint(url) {
   }
 }
 
+function extractSqlmapCandidateParams(exchange) {
+  const params = [];
+  const seen = new Set();
+  const requestUrl = exchange?.request?.url || exchange?.response?.url || "";
+  const body = exchange?.request?.postData || "";
+
+  function addParam(source, name) {
+    const normalizedName = String(name || "").trim();
+    if (!normalizedName) {
+      return;
+    }
+
+    const key = `${source}:${normalizedName}`;
+    if (seen.has(key)) {
+      return;
+    }
+
+    seen.add(key);
+    params.push({ source, name: normalizedName });
+  }
+
+  try {
+    const parsedUrl = new URL(requestUrl);
+    parsedUrl.searchParams.forEach((_value, key) => addParam("query", key));
+    parsedUrl.pathname
+      .split("/")
+      .filter(Boolean)
+      .forEach((segment, index) => {
+        if (/^\d+$/.test(segment) || /^[0-9a-f-]{8,}$/i.test(segment)) {
+          addParam("path", `segment${index + 1}`);
+        }
+      });
+  } catch {
+    const query = requestUrl.split("?")[1] || "";
+    new URLSearchParams(query).forEach((_value, key) => addParam("query", key));
+  }
+
+  if (body) {
+    try {
+      const parsedBody = JSON.parse(body);
+      if (parsedBody && typeof parsedBody === "object" && !Array.isArray(parsedBody)) {
+        Object.keys(parsedBody).forEach((key) => addParam("json", key));
+      }
+    } catch {
+      new URLSearchParams(body).forEach((_value, key) => addParam("body", key));
+    }
+  }
+
+  return params;
+}
+
 function getCombinedExcludePatterns(input) {
   const userPatterns = String(input || "")
     .split(",")
@@ -491,6 +563,31 @@ function isImageLikeExchange(exchange) {
   return urls.some((url) =>
     [".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".avif", ".tiff", ".jfif"]
       .some((ext) => url.includes(ext))
+  );
+}
+
+function isApiLikeExchange(exchange) {
+  if (isImageLikeExchange(exchange)) {
+    return false;
+  }
+
+  const resourceType = String(exchange.request?.resourceType || "").toLowerCase();
+  const requestUrl = String(exchange.request?.url || exchange.response?.url || "").toLowerCase();
+  const requestBody = exchange.request?.postData || "";
+  const contentType = String(
+    exchange.response?.headers?.["content-type"] ||
+      exchange.request?.headers?.["content-type"] ||
+      ""
+  ).toLowerCase();
+
+  return (
+    ["fetch", "xhr", "websocket", "eventsource"].includes(resourceType) ||
+    contentType.includes("application/json") ||
+    contentType.includes("application/graphql") ||
+    requestUrl.includes("/api/") ||
+    requestUrl.includes("/graphql") ||
+    requestUrl.includes("api.") ||
+    Boolean(requestBody)
   );
 }
 
@@ -2037,6 +2134,53 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
 }
 
 function MermaidModal({ code, onClose, onCopy }) {
+  const [previewSvg, setPreviewSvg] = useState("");
+  const [previewError, setPreviewError] = useState("");
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function renderMermaidPreview() {
+      if (!code) {
+        setPreviewSvg("");
+        return;
+      }
+
+      try {
+        setPreviewError("");
+        mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: "strict",
+          theme: "base",
+          themeVariables: {
+            primaryColor: "#e7f0ff",
+            primaryTextColor: "#071426",
+            primaryBorderColor: "#8fb4ff",
+            lineColor: "#3a485b",
+            secondaryColor: "#fff1d7",
+            tertiaryColor: "#dcfce7",
+            fontFamily: "KorPubDotum, sans-serif"
+          }
+        });
+        const { svg } = await mermaid.render(`capture-flow-${Date.now()}`, code);
+        if (!cancelled) {
+          setPreviewSvg(svg);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setPreviewSvg("");
+          setPreviewError(error instanceof Error ? error.message : "Mermaid preview render failed.");
+        }
+      }
+    }
+
+    renderMermaidPreview();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [code]);
+
   if (!code) {
     return null;
   }
@@ -2045,12 +2189,27 @@ function MermaidModal({ code, onClose, onCopy }) {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal-shell mermaid-modal-shell" onClick={(event) => event.stopPropagation()}>
         <div className="mermaid-modal-header">
-          <div />
+          <strong>Mermaid Flow</strong>
           <button type="button" onClick={onCopy}>
             복사
           </button>
         </div>
-        <pre className="mermaid-modal-code">{code}</pre>
+        <div className="mermaid-modal-grid">
+          <section className="mermaid-panel">
+            <strong>Code</strong>
+            <pre className="mermaid-modal-code">{code}</pre>
+          </section>
+          <section className="mermaid-panel">
+            <strong>Preview</strong>
+            <div className="mermaid-preview-box">
+              {previewError ? (
+                <span className="mermaid-preview-error">{previewError}</span>
+              ) : (
+                <div dangerouslySetInnerHTML={{ __html: previewSvg }} />
+              )}
+            </div>
+          </section>
+        </div>
       </div>
     </div>
   );
@@ -2060,6 +2219,7 @@ export default function App() {
   const appShellRef = useRef(null);
   const activeRef = useRef(false);
   const autoStoppedSessionRef = useRef("");
+  const summarizedSessionRef = useRef("");
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -2162,8 +2322,10 @@ export default function App() {
   const [aiSummaryLoading, setAiSummaryLoading] = useState(false);
   const [aiSummaryError, setAiSummaryError] = useState("");
   const [sqlmapForm, setSqlmapForm] = useState({
+    selectedExchangeId: "",
     url: "",
     method: "GET",
+    query: "",
     data: "",
     headers: "",
     level: "1",
@@ -2172,6 +2334,15 @@ export default function App() {
   const [sqlmapLoading, setSqlmapLoading] = useState(false);
   const [sqlmapResult, setSqlmapResult] = useState(null);
   const [sqlmapError, setSqlmapError] = useState("");
+  const [apiTestForm, setApiTestForm] = useState({
+    url: "",
+    method: "GET",
+    headers: "{\n  \"Content-Type\": \"application/json\"\n}",
+    body: ""
+  });
+  const [apiTestLoading, setApiTestLoading] = useState(false);
+  const [apiTestResult, setApiTestResult] = useState(null);
+  const [apiTestError, setApiTestError] = useState("");
   const mergedHarHistory = [
     ...localHarHistory.map((item) => ({ ...item, historySource: "local" })),
     ...recentHarAnalyses
@@ -2194,6 +2365,43 @@ export default function App() {
         (item) => !localHarHistory.some((localItem) => localItem.fingerprint === item.fingerprint)
       )
   ];
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    function reloadOnceForStaleChunk() {
+      const lastAttempt = Number(window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) || 0);
+      if (Date.now() - lastAttempt < 30000) {
+        return;
+      }
+
+      window.sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, String(Date.now()));
+      window.location.reload();
+    }
+
+    function handlePreloadError(event) {
+      event.preventDefault();
+      reloadOnceForStaleChunk();
+    }
+
+    function handleUnhandledRejection(event) {
+      if (isDynamicImportError(event.reason)) {
+        event.preventDefault();
+        reloadOnceForStaleChunk();
+      }
+    }
+
+    window.addEventListener("vite:preloadError", handlePreloadError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener("vite:preloadError", handlePreloadError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, []);
+
   const mergedInspectionRuns = [
     ...localInspectionRuns.map((item) => ({ ...item, historySource: "local" })),
     ...recentInspectionRuns
@@ -2278,6 +2486,19 @@ export default function App() {
     }
 
     if (liveExcludePatterns.length === 0) return true;
+    const requestUrl = exchange.request?.url || "";
+    const responseUrl = exchange.response?.url || "";
+    return !liveExcludePatterns.some(
+      (pattern) =>
+        (requestUrl && requestUrl.includes(pattern)) ||
+      (responseUrl && responseUrl.includes(pattern))
+    );
+  });
+  const apiCapturedExchanges = exchangesWithDiffs.filter((exchange) => {
+    if (!isApiLikeExchange(exchange)) {
+      return false;
+    }
+
     const requestUrl = exchange.request?.url || "";
     const responseUrl = exchange.response?.url || "";
     return !liveExcludePatterns.some(
@@ -2409,12 +2630,15 @@ export default function App() {
             );
           }
 
-          if (data.stopReason === "crawl-complete") {
-            await requestOpenAiSummary({
-              targetUrl: data.targetUrl,
-              exchanges: data.exchanges || [],
-              errors: data.errors || []
-            });
+          if (["crawl-complete", "idle"].includes(data.stopReason)) {
+            await requestCaptureCompletionSummary(
+              {
+                targetUrl: data.targetUrl,
+                exchanges: data.exchanges || [],
+                errors: data.errors || []
+              },
+              data.sessionId
+            );
           }
         }
 
@@ -2676,6 +2900,21 @@ export default function App() {
     }
   }
 
+  async function requestCaptureCompletionSummary(captureInput, sessionId) {
+    const summaryKey =
+      sessionId ||
+      `${captureInput?.targetUrl || "capture"}-${captureInput?.exchanges?.length || 0}-${
+        captureInput?.errors?.length || 0
+      }`;
+
+    if (summarizedSessionRef.current === summaryKey) {
+      return;
+    }
+
+    summarizedSessionRef.current = summaryKey;
+    await requestOpenAiSummary(captureInput);
+  }
+
   async function runSqlmapScan(event) {
     event.preventDefault();
     setSqlmapLoading(true);
@@ -2683,10 +2922,21 @@ export default function App() {
     setSqlmapResult(null);
 
     try {
+      if (!sqlmapForm.selectedExchangeId) {
+        throw new Error("Captured Candidates에서 스캔할 요청을 먼저 선택하세요.");
+      }
+
+      const method = String(sqlmapForm.method || "GET").toUpperCase();
+      const scanUrl = method === "GET" ? buildSqlmapGetUrl(sqlmapForm.url, sqlmapForm.query) : sqlmapForm.url;
       const response = await fetch(`${API_BASE_URL}/api/sqlmap/scan`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(sqlmapForm)
+        body: JSON.stringify({
+          ...sqlmapForm,
+          method,
+          url: scanUrl,
+          data: method === "GET" ? "" : sqlmapForm.data
+        })
       });
       const { data, rawText } = await readJsonSafely(response);
 
@@ -2702,17 +2952,156 @@ export default function App() {
     }
   }
 
-  function loadSqlmapFromExchange(exchange) {
-    setSqlmapForm({
+  function parseApiHeaders(input) {
+    const trimmed = String(input || "").trim();
+    if (!trimmed) {
+      return {};
+    }
+
+    if (trimmed.startsWith("{")) {
+      return JSON.parse(trimmed);
+    }
+
+    return Object.fromEntries(
+      trimmed
+        .split(/\n+/)
+        .map((line) => line.trim())
+        .filter((line) => line.includes(":"))
+        .map((line) => {
+          const separatorIndex = line.indexOf(":");
+          return [line.slice(0, separatorIndex).trim(), line.slice(separatorIndex + 1).trim()];
+        })
+    );
+  }
+
+  async function runApiTest(event) {
+    event.preventDefault();
+
+    if (readOnlyDeployment) {
+      setApiTestError("배포 사이트에서는 API Test를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
+    setApiTestLoading(true);
+    setApiTestError("");
+    setApiTestResult(null);
+
+    try {
+      const method = String(apiTestForm.method || "GET").toUpperCase();
+      const headers = parseApiHeaders(apiTestForm.headers);
+      const response = await fetch(`${API_BASE_URL}/api/replay-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          method,
+          url: apiTestForm.url,
+          headers,
+          body: ["GET", "HEAD", "DELETE"].includes(method) ? "" : apiTestForm.body
+        })
+      });
+      const { data, rawText } = await readJsonSafely(response);
+
+      if (!response.ok) {
+        throw new Error(data?.error || rawText || "API 테스트 요청에 실패했습니다.");
+      }
+
+      setApiTestResult(data?.response || null);
+    } catch (error) {
+      setApiTestError(error instanceof Error ? error.message : "API 테스트 요청에 실패했습니다.");
+    } finally {
+      setApiTestLoading(false);
+    }
+  }
+
+  function loadApiTestFromExchange(exchange) {
+    setApiTestForm({
       url: exchange.request?.url || exchange.response?.url || "",
       method: exchange.request?.method || "GET",
-      data: exchange.request?.postData || "",
+      headers: prettyJson(exchange.request?.headers || {}),
+      body: exchange.request?.postData || ""
+    });
+  }
+
+  function buildSqlmapGetUrl(url, query) {
+    const trimmedUrl = String(url || "").trim();
+    const trimmedQuery = String(query || "").trim().replace(/^\?/, "");
+
+    if (!trimmedQuery) {
+      return trimmedUrl;
+    }
+
+    try {
+      const nextUrl = new URL(trimmedUrl);
+      nextUrl.search = trimmedQuery;
+      return nextUrl.toString();
+    } catch {
+      const [baseUrl] = trimmedUrl.split("?");
+      return `${baseUrl}?${trimmedQuery}`;
+    }
+  }
+
+  function stripUrlQuery(url) {
+    try {
+      const nextUrl = new URL(url);
+      nextUrl.search = "";
+      return nextUrl.toString();
+    } catch {
+      return String(url || "").split("?")[0];
+    }
+  }
+
+  function changeSqlmapMethod(nextMethod) {
+    const method = String(nextMethod || "GET").toUpperCase();
+
+    setSqlmapForm((current) => {
+      const currentQuery = current.query || getQueryFromUrl(current.url);
+
+      if (method === "GET") {
+        return {
+          ...current,
+          method,
+          url: buildSqlmapGetUrl(current.url, currentQuery),
+          query: currentQuery,
+          data: current.data
+        };
+      }
+
+      return {
+        ...current,
+        method,
+        url: stripUrlQuery(current.url),
+        query: currentQuery,
+        data: current.data || currentQuery
+      };
+    });
+  }
+
+  function getQueryFromUrl(url) {
+    try {
+      return new URL(url).search.replace(/^\?/, "");
+    } catch {
+      return String(url || "").split("?")[1] || "";
+    }
+  }
+
+  function loadSqlmapFromExchange(exchange) {
+    const requestUrl = exchange.request?.url || exchange.response?.url || "";
+    const method = exchange.request?.method || "GET";
+
+    setSqlmapForm({
+      selectedExchangeId: exchange.id,
+      url: method === "GET" ? requestUrl : stripUrlQuery(requestUrl),
+      method,
+      query: getQueryFromUrl(requestUrl),
+      data: exchange.request?.postData || (method === "GET" ? "" : getQueryFromUrl(requestUrl)),
       headers: Object.entries(exchange.request?.headers || {})
         .map(([key, value]) => `${key}: ${String(value)}`)
         .join("\n"),
       level: sqlmapForm.level,
       risk: sqlmapForm.risk
     });
+    setSqlmapResult(null);
+    setSqlmapError("");
   }
 
   async function startCapture(event) {
@@ -2775,6 +3164,7 @@ export default function App() {
       });
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
+      summarizedSessionRef.current = "";
       setExchanges([]);
       setErrors([]);
     } catch (error) {
@@ -2880,6 +3270,14 @@ export default function App() {
       }
 
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
+      await requestCaptureCompletionSummary(
+        {
+          targetUrl: domain || getStoredValue("http-analyzer-domain") || "",
+          exchanges: analyzedExchanges,
+          errors
+        },
+        captureSessionId || localRun.id
+      );
       setStatusMessage("");
       setActive(false);
       activeRef.current = false;
@@ -3574,13 +3972,20 @@ window.addEventListener("load", () => {
       count: sqlmapResult ? 1 : 0
     },
     {
+      key: "api-test",
+      icon: "api",
+      label: "API Test",
+      description: "API 요청 테스트",
+      count: apiCapturedExchanges.length
+    },
+    {
       key: "settings",
       icon: "settings",
       label: "Settings",
       description: "OpenAI Summary 설정",
       count: openAiKey ? 1 : 0
     }
-  ].filter((item) => !readOnlyDeployment || !["capture", "har", "sqlmap"].includes(item.key));
+  ].filter((item) => !readOnlyDeployment || !["capture", "har", "sqlmap", "api-test"].includes(item.key));
 
   function navigateToSection(sectionKey) {
     if (sectionKey !== "findings") {
@@ -3707,7 +4112,6 @@ window.addEventListener("load", () => {
                 <span aria-hidden="true">⌕</span>
                 <input type="search" placeholder="Search sessions..." />
               </div>
-              <h1 className="workspace-title">Network / Overview</h1>
               <div className="topbar-badges">
                 <div className="login-user-copy">
                   {authUser.picture ? (
@@ -3889,12 +4293,29 @@ window.addEventListener("load", () => {
                     </button>
                   </div>
                 </form>
+                {aiSummaryLoading || aiSummaryError || aiSummary ? (
+                  <div className="capture-ai-summary">
+                    <div>
+                      <strong>OpenAI Summary</strong>
+                      <span>
+                        {aiSummaryLoading
+                          ? "캡처 결과를 분석 중입니다."
+                          : aiSummary
+                            ? "최근 캡처 완료 후 생성된 요약입니다."
+                            : "Summary 생성 상태"}
+                      </span>
+                    </div>
+                    {aiSummaryError ? <div className="error-strip">{aiSummaryError}</div> : null}
+                    {aiSummary ? <pre>{aiSummary}</pre> : null}
+                  </div>
+                ) : null}
               </div>
             ) : activeSection === "overview" ||
               activeSection === "findings" ||
               activeSection === "har" ||
               activeSection === "recent" ||
               activeSection === "sqlmap" ||
+              activeSection === "api-test" ||
               activeSection === "settings" ? null : (
               <div className={`section-intro ${activeSection === "findings" ? "findings-intro" : ""}`}>
                 <h2 className="section-title">
@@ -4226,18 +4647,21 @@ window.addEventListener("load", () => {
                 <div className="tool-panel section-panel">
                   <strong>SQLMap Injection Scan</strong>
                   <p className="tool-copy">
-                    허가된 대상에 대해서만 SQL Injection 가능성을 점검하세요. 서버에 `sqlmap`이 설치되어 있어야 실행됩니다.
+                    Captured Candidates에서 선택한 요청만 SQL Injection 가능성을 점검합니다. 서버에 `sqlmap`이 설치되어 있어야 실행됩니다.
                   </p>
                   <form className="tool-form" onSubmit={runSqlmapScan}>
+                    <div className="tool-note">
+                      {sqlmapForm.selectedExchangeId
+                        ? "선택된 캡처 요청만 스캔합니다. Target URL과 Body는 선택된 요청 기준으로 조정됩니다."
+                        : "아래 Captured Candidates에서 스캔할 요청을 먼저 선택하세요."}
+                    </div>
                     <label className="field-label field-card">
                       <span>Target URL</span>
                       <input
                         type="text"
                         placeholder="https://target.example/api?id=1"
                         value={sqlmapForm.url}
-                        onChange={(event) =>
-                          setSqlmapForm((current) => ({ ...current, url: event.target.value }))
-                        }
+                        readOnly
                       />
                     </label>
                     <div className="tool-grid-3">
@@ -4245,9 +4669,7 @@ window.addEventListener("load", () => {
                         <span>Method</span>
                         <select
                           value={sqlmapForm.method}
-                          onChange={(event) =>
-                            setSqlmapForm((current) => ({ ...current, method: event.target.value }))
-                          }
+                          onChange={(event) => changeSqlmapMethod(event.target.value)}
                         >
                           <option value="GET">GET</option>
                           <option value="POST">POST</option>
@@ -4280,6 +4702,31 @@ window.addEventListener("load", () => {
                         />
                       </label>
                     </div>
+                    {sqlmapForm.method === "GET" ? (
+                      <label className="field-label field-card">
+                        <span>Query Parameters</span>
+                        <textarea
+                          rows={4}
+                          placeholder="id=1&name=test"
+                          value={sqlmapForm.query}
+                          onChange={(event) =>
+                            setSqlmapForm((current) => ({ ...current, query: event.target.value }))
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <label className="field-label field-card">
+                        <span>{sqlmapForm.method} Body / Data</span>
+                        <textarea
+                          rows={5}
+                          placeholder="id=1&name=test"
+                          value={sqlmapForm.data}
+                          onChange={(event) =>
+                            setSqlmapForm((current) => ({ ...current, data: event.target.value }))
+                          }
+                        />
+                      </label>
+                    )}
                     <label className="field-label field-card">
                       <span>Headers</span>
                       <textarea
@@ -4291,19 +4738,11 @@ window.addEventListener("load", () => {
                         }
                       />
                     </label>
-                    <label className="field-label field-card">
-                      <span>Body / Data</span>
-                      <textarea
-                        rows={5}
-                        placeholder="id=1&name=test"
-                        value={sqlmapForm.data}
-                        onChange={(event) =>
-                          setSqlmapForm((current) => ({ ...current, data: event.target.value }))
-                        }
-                      />
-                    </label>
                     <div className="action-row">
-                      <button type="submit" disabled={sqlmapLoading || !sqlmapForm.url.trim()}>
+                      <button
+                        type="submit"
+                        disabled={sqlmapLoading || !sqlmapForm.selectedExchangeId || !sqlmapForm.url.trim()}
+                      >
                         {sqlmapLoading ? "SQLMap 실행 중..." : "SQLMap Scan"}
                       </button>
                     </div>
@@ -4312,17 +4751,33 @@ window.addEventListener("load", () => {
                   {visibleExchanges.length > 0 ? (
                     <div className="candidate-list">
                       <strong>Captured Candidates</strong>
-                      {visibleExchanges.slice(0, 12).map((exchange) => (
-                        <button
-                          key={exchange.id}
-                          type="button"
-                          className="candidate-row"
-                          onClick={() => loadSqlmapFromExchange(exchange)}
-                        >
-                          <span>{exchange.request?.method || "GET"}</span>
-                          <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
-                        </button>
-                      ))}
+                      {visibleExchanges.slice(0, 12).map((exchange) => {
+                        const candidateParams = extractSqlmapCandidateParams(exchange);
+
+                        return (
+                          <button
+                            key={exchange.id}
+                            type="button"
+                            className={`candidate-row ${
+                              sqlmapForm.selectedExchangeId === exchange.id ? "active" : ""
+                            }`}
+                            onClick={() => loadSqlmapFromExchange(exchange)}
+                          >
+                            <span>{exchange.request?.method || "GET"}</span>
+                            <div className="candidate-main">
+                              <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
+                              <small>
+                                Params:{" "}
+                                {candidateParams.length > 0
+                                  ? candidateParams
+                                      .map((item) => `${item.source}:${item.name}`)
+                                      .join(", ")
+                                  : "식별된 파라미터 없음"}
+                              </small>
+                            </div>
+                          </button>
+                        );
+                      })}
                     </div>
                   ) : null}
                   {sqlmapResult ? (
@@ -4339,13 +4794,122 @@ window.addEventListener("load", () => {
             </section>
           ) : null}
 
+          {activeSection === "api-test" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="tool-panel section-panel">
+                  <strong>API Request Test</strong>
+                  <p className="tool-copy">
+                    캡처된 요청을 불러오거나 직접 API 요청을 구성해 응답 상태, 헤더, 바디를 확인합니다.
+                  </p>
+                  <form className="tool-form" onSubmit={runApiTest}>
+                    <div className="tool-grid-3">
+                      <label className="field-label field-card">
+                        <span>Method</span>
+                        <select
+                          value={apiTestForm.method}
+                          onChange={(event) =>
+                            setApiTestForm((current) => ({ ...current, method: event.target.value }))
+                          }
+                        >
+                          <option value="GET">GET</option>
+                          <option value="POST">POST</option>
+                          <option value="PUT">PUT</option>
+                          <option value="PATCH">PATCH</option>
+                          <option value="DELETE">DELETE</option>
+                          <option value="HEAD">HEAD</option>
+                        </select>
+                      </label>
+                      <label className="field-label field-card tool-grid-span-2">
+                        <span>URL</span>
+                        <input
+                          type="text"
+                          placeholder="https://api.example.com/resource"
+                          value={apiTestForm.url}
+                          onChange={(event) =>
+                            setApiTestForm((current) => ({ ...current, url: event.target.value }))
+                          }
+                        />
+                      </label>
+                    </div>
+                    <label className="field-label field-card">
+                      <span>Headers</span>
+                      <textarea
+                        rows={6}
+                        placeholder={'{\n  "Authorization": "Bearer ..."\n}\n\n또는\nAuthorization: Bearer ...'}
+                        value={apiTestForm.headers}
+                        onChange={(event) =>
+                          setApiTestForm((current) => ({ ...current, headers: event.target.value }))
+                        }
+                      />
+                    </label>
+                    {!["GET", "HEAD", "DELETE"].includes(apiTestForm.method) ? (
+                      <label className="field-label field-card">
+                        <span>Body</span>
+                        <textarea
+                          rows={8}
+                          placeholder='{"id":1,"name":"test"}'
+                          value={apiTestForm.body}
+                          onChange={(event) =>
+                            setApiTestForm((current) => ({ ...current, body: event.target.value }))
+                          }
+                        />
+                      </label>
+                    ) : (
+                      <div className="tool-note">
+                        {apiTestForm.method} 요청은 Body 없이 URL과 Headers만 전송합니다.
+                      </div>
+                    )}
+                    <div className="action-row">
+                      <button type="submit" disabled={apiTestLoading || !apiTestForm.url.trim()}>
+                        {apiTestLoading ? "API 요청 중..." : "API Test"}
+                      </button>
+                    </div>
+                  </form>
+                  {apiTestError ? <div className="error-strip">{apiTestError}</div> : null}
+                  {apiCapturedExchanges.length > 0 ? (
+                    <div className="candidate-list">
+                      <strong>Captured Requests ({apiCapturedExchanges.length})</strong>
+                      {apiCapturedExchanges.map((exchange) => (
+                        <button
+                          key={exchange.id}
+                          type="button"
+                          className="candidate-row"
+                          onClick={() => loadApiTestFromExchange(exchange)}
+                        >
+                          <span>{exchange.request?.method || "GET"}</span>
+                          <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                  {apiTestResult ? (
+                    <div className="tool-result">
+                      <strong>API Response</strong>
+                      <span>
+                        {apiTestResult.status} {apiTestResult.statusText || ""}
+                      </span>
+                      <CodeBlock
+                        sections={[
+                          { label: "Headers", content: prettyJson(apiTestResult.headers) },
+                          { label: "Body", content: apiTestResult.body || "(empty)" }
+                        ]}
+                        maskSensitive={maskSensitive}
+                      />
+                    </div>
+                  ) : null}
+                </div>
+              </article>
+            </section>
+          ) : null}
+
           {activeSection === "settings" ? (
             <section className="pair-list">
               <article className="panel stacked-panel">
                 <div className="tool-panel section-panel">
                   <strong>OpenAI Summary Settings</strong>
                   <p className="tool-copy">
-                    크롤링이 `crawl-complete`로 끝나면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 브라우저 상태에만 보관하고 서버에 저장하지 않습니다.
+                    캡처가 자동 완료되거나 `캡처 중지`로 종료되면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 브라우저 상태에만 보관하고 서버에 저장하지 않습니다.
                   </p>
                   <div className="tool-grid-2">
                     <label className="field-label field-card">
@@ -4466,24 +5030,40 @@ window.addEventListener("load", () => {
                               </button>
                               <button
                                 type="button"
+                                className="tooltip-button"
+                                data-tooltip="현재 브라우저 세션에서만 이 finding을 숨깁니다. 새로고침/새 캡처 후에는 다시 보일 수 있습니다."
+                                title="현재 브라우저 세션에서만 이 finding을 숨깁니다."
+                                aria-label="세션 오탐: 현재 브라우저 세션에서만 숨김"
                                 onClick={() => suppressFindingByScope("session", finding, exchange)}
                               >
                                 세션 오탐
                               </button>
                               <button
                                 type="button"
+                                className="tooltip-button"
+                                data-tooltip="같은 엔드포인트에서 발생한 동일 finding을 앞으로 숨깁니다. 예: /api/users 단위"
+                                title="같은 엔드포인트에서 발생한 동일 finding을 숨깁니다."
+                                aria-label="엔드포인트 오탐: 같은 엔드포인트의 동일 finding 숨김"
                                 onClick={() => suppressFindingByScope("endpoint", finding, exchange)}
                               >
                                 엔드포인트 오탐
                               </button>
                               <button
                                 type="button"
+                                className="tooltip-button"
+                                data-tooltip="같은 호스트에서 발생한 동일 finding을 숨깁니다. 예: api.example.com 전체"
+                                title="같은 호스트에서 발생한 동일 finding을 숨깁니다."
+                                aria-label="호스트 오탐: 같은 호스트의 동일 finding 숨김"
                                 onClick={() => suppressFindingByScope("host", finding, exchange)}
                               >
                                 호스트 오탐
                               </button>
                               <button
                                 type="button"
+                                className="tooltip-button"
+                                data-tooltip="모든 요청에서 동일 finding 유형을 숨깁니다. 가장 넓은 범위라 신중하게 사용하세요."
+                                title="모든 요청에서 동일 finding 유형을 숨깁니다."
+                                aria-label="전역 오탐: 모든 요청에서 동일 finding 유형 숨김"
                                 onClick={() => suppressFindingByScope("global", finding, exchange)}
                               >
                                 전역 오탐
@@ -4524,6 +5104,7 @@ window.addEventListener("load", () => {
                                     Critical {securityFindings.filter((item) => item.severity === "critical").length}
                                     {" / "}High {securityFindings.filter((item) => item.severity === "high").length}
                                     {" / "}Medium {securityFindings.filter((item) => item.severity === "medium").length}
+                                    {" / "}Low {securityFindings.filter((item) => item.severity === "low").length}
                                   </span>
                                 </div>
                                 <div className="security-summary-actions">

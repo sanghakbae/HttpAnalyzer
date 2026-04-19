@@ -72,6 +72,7 @@ const captureState = {
   errors: []
 };
 
+const attachedCapturePages = new WeakSet();
 const memoryRecentCaptureEvents = [];
 
 function resetCaptureCollections() {
@@ -651,6 +652,11 @@ async function loadRecentInspectionRuns(limit = 15) {
 }
 
 function attachCaptureListeners(page, targetHost) {
+  if (attachedCapturePages.has(page)) {
+    return;
+  }
+
+  attachedCapturePages.add(page);
   const exchangeMap = new Map();
 
   function shouldExclude(url) {
