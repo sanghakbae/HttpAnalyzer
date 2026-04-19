@@ -622,23 +622,32 @@ input {
 .field-label {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
   min-width: 0;
+  padding: 7px 8px;
 }
 
 .field-label span {
-  color: #111111;
-  font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 8px;
+  background: rgba(17, 24, 39, 0.08);
+  color: #111827;
+  font-size: 13px;
   font-weight: 700;
-  flex: 0 0 96px;
+  flex: 0 0 auto;
   white-space: nowrap;
   letter-spacing: 0.01em;
 }
 
 .capture-form input {
   width: 100%;
-  padding: 9px 12px;
+  min-width: 0;
+  padding: 8px 10px;
   border: 1px solid var(--input-border);
   border-radius: 8px;
   background: var(--input-bg);
@@ -669,21 +678,21 @@ input {
 .auth-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 10px;
   width: 100%;
   min-width: 0;
 }
 
 .auth-fields {
-  grid-template-columns: minmax(0, 0.82fr) minmax(0, 0.82fr) minmax(0, 1.36fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
 }
 
-.session-field span {
-  flex-basis: 118px;
+.session-field {
+  grid-column: 1 / -1;
 }
 
 .field-hint {
-  margin: -4px 0 0;
+  margin: -2px 0 0;
   color: #74664d;
   font-size: 0.8rem;
   line-height: 1.4;

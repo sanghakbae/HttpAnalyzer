@@ -3658,7 +3658,7 @@ window.addEventListener("load", () => {
                       <input
                         type="password"
                         autoComplete="off"
-                        placeholder="SESSIONID=... 또는 Cookie 문자열"
+                        placeholder="세션 쿠키 값 입력 예: SESSIONID=...; token=..."
                         value={sessionValue}
                         onChange={(event) => setSessionValue(event.target.value)}
                       />
