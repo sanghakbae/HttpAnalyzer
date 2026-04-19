@@ -377,6 +377,15 @@ function normalizeCrawlUrl(input, baseUrl, targetHost) {
   }
 }
 
+function isSameTargetHostUrl(input, targetHost) {
+  try {
+    const parsedUrl = new URL(input);
+    return ["http:", "https:"].includes(parsedUrl.protocol) && parsedUrl.host === targetHost;
+  } catch {
+    return false;
+  }
+}
+
 async function collectSameHostLinks(page, targetHost) {
   const currentUrl = page.url();
   const links = await page
@@ -417,7 +426,7 @@ async function crawlCapturePages(page, targetUrl, targetHost, sessionId) {
     captureState.page
   ) {
     const nextUrl = queue.shift();
-    if (!nextUrl || visited.has(nextUrl)) {
+    if (!nextUrl || visited.has(nextUrl) || !isSameTargetHostUrl(nextUrl, targetHost)) {
       continue;
     }
 
@@ -597,6 +606,72 @@ async function saveInspectionRun(payload) {
   return { saved: true };
 }
 
+function isUuid(value) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    String(value || "")
+  );
+}
+
+async function saveInspectionRunSummary(payload) {
+  if (!supabase) {
+    return { saved: false, reason: "Supabase credentials are not configured." };
+  }
+
+  if (!payload.summary) {
+    return { saved: false, reason: "summary is required." };
+  }
+
+  let query = supabase
+    .from("capture_inspection_runs")
+    .select("id, report_snapshot")
+    .order("ended_at", { ascending: false })
+    .limit(1);
+
+  if (isUuid(payload.capture_session_id)) {
+    query = query.eq("capture_session_id", payload.capture_session_id);
+  } else if (payload.target_url) {
+    query = query.eq("target_url", payload.target_url);
+  } else {
+    return { saved: false, reason: "capture_session_id or target_url is required." };
+  }
+
+  const { data, error } = await query;
+
+  if (error) {
+    return { saved: false, reason: error.message };
+  }
+
+  const run = Array.isArray(data) ? data[0] : null;
+  if (!run) {
+    return { saved: false, reason: "No matching inspection run was found." };
+  }
+
+  const summaryMeta =
+    payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
+  const reportSnapshot =
+    run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {};
+
+  const { error: updateError } = await supabase
+    .from("capture_inspection_runs")
+    .update({
+      report_snapshot: {
+        ...reportSnapshot,
+        aiSummary: payload.summary,
+        aiSummaryMeta: {
+          ...summaryMeta,
+          syncedAt: new Date().toISOString()
+        }
+      }
+    })
+    .eq("id", run.id);
+
+  if (updateError) {
+    return { saved: false, reason: updateError.message };
+  }
+
+  return { saved: true, id: run.id };
+}
+
 async function loadRecentHarAnalyses(limit = 10) {
   if (!supabase) {
     return [];
@@ -665,7 +740,7 @@ function attachCaptureListeners(page, targetHost) {
 
   page.on("request", async (request) => {
     const url = request.url();
-    if (!url.includes(targetHost)) {
+    if (!isSameTargetHostUrl(url, targetHost)) {
       return;
     }
 
@@ -697,7 +772,7 @@ function attachCaptureListeners(page, targetHost) {
 
   page.on("response", async (response) => {
     const url = response.url();
-    if (!url.includes(targetHost)) {
+    if (!isSameTargetHostUrl(url, targetHost)) {
       return;
     }
 
@@ -768,7 +843,7 @@ function attachCaptureListeners(page, targetHost) {
 
   page.on("requestfailed", (request) => {
     const url = request.url();
-    if (!url.includes(targetHost)) {
+    if (!isSameTargetHostUrl(url, targetHost)) {
       return;
     }
 
@@ -1122,6 +1197,34 @@ app.post("/api/inspection-runs", async (request, response) => {
   } catch (error) {
     response.status(400).json({
       error: error instanceof Error ? error.message : "Failed to save inspection run"
+    });
+  }
+});
+
+app.post("/api/inspection-runs/summary", async (request, response) => {
+  const payload = request.body ?? {};
+
+  try {
+    const saved = await saveInspectionRunSummary({
+      capture_session_id: payload.capture_session_id ?? null,
+      target_url: payload.target_url ?? "",
+      summary: payload.summary ?? "",
+      summary_meta:
+        payload.summary_meta && typeof payload.summary_meta === "object"
+          ? payload.summary_meta
+          : {}
+    });
+
+    if (!saved.saved) {
+      response.status(400).json(saved);
+      return;
+    }
+
+    response.json(saved);
+  } catch (error) {
+    response.status(500).json({
+      saved: false,
+      reason: error instanceof Error ? error.message : "Failed to save inspection summary."
     });
   }
 });

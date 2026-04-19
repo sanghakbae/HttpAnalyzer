@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from "react";
-import mermaid from "mermaid";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./lib/supabase";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
@@ -10,6 +9,7 @@ const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
 const LOCAL_INSPECTION_RUNS_KEY = "http-analyzer-local-inspection-runs";
 const LOCAL_CAPTURE_EVENTS_KEY = "http-analyzer-local-capture-events";
+const LOCAL_AI_SUMMARIES_KEY = "http-analyzer-local-ai-summaries";
 const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
@@ -36,6 +36,15 @@ const SQLI_REGEX =
   /(?:'|"|%27|%22)\s*(?:or|and)\s*(?:'?\d+'?\s*=\s*'?\d+'?|true|false)|union\s+select|sleep\s*\(|benchmark\s*\(|waitfor\s+delay|information_schema|load_file\s*\(/i;
 const XSS_REGEX =
   /<script\b|javascript:|onerror\s*=|onload\s*=|<img[^>]+src=|<svg[^>]+onload=|document\.cookie|alert\s*\(/i;
+const JS_SECRET_LITERAL_REGEX =
+  /\b(?:apiKey|api_key|clientSecret|client_secret|accessToken|access_token|refreshToken|refresh_token|idToken|id_token|jwt|secret|authorization|bearer|password|passwd)\b\s*[:=]\s*["'`][^"'`]{8,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16}/i;
+const JS_DANGEROUS_SINK_REGEX =
+  /\b(?:eval|Function)\s*\(|new\s+Function\s*\(|set(?:Timeout|Interval)\s*\(\s*["'`]|document\.write\s*\(|\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML\s*\(|dangerouslySetInnerHTML/i;
+const JS_DOM_XSS_FLOW_REGEX =
+  /(?:location\.(?:hash|search|href)|document\.(?:URL|documentURI|referrer)|window\.name)[\s\S]{0,320}(?:innerHTML|outerHTML|document\.write|insertAdjacentHTML|eval|Function)/i;
+const JS_POSTMESSAGE_WILDCARD_REGEX = /\.postMessage\s*\([^,]+,\s*["'`]\*["'`]/i;
+const JS_SOURCE_MAP_REGEX = /(?:\/\/|\/\*)#\s*sourceMappingURL=|\.map(?:[?#]|$)/i;
+const JS_DEBUG_ARTIFACT_REGEX = /\bdebugger\s*;|console\.(?:log|debug|trace)\s*\(/i;
 const PATH_TRAVERSAL_REGEX = /(?:\.\.\/|\.\.\\|%2e%2e%2f|%2e%2e\/|%252e%252e%252f)/i;
 const COMMAND_INJECTION_REGEX = /(?:;|\|\||&&|\|)\s*(?:cat|ls|id|whoami|curl|wget|bash|sh|powershell|cmd)\b/i;
 const OPEN_REDIRECT_REGEX =
@@ -490,6 +499,16 @@ function normalizeEndpoint(url) {
   }
 }
 
+function isSameTargetHostExchange(exchange, targetHost) {
+  if (!targetHost) {
+    return true;
+  }
+
+  const requestHost = getHostFromUrl(exchange.request?.url || "");
+  const responseHost = getHostFromUrl(exchange.response?.url || "");
+  return requestHost === targetHost || responseHost === targetHost;
+}
+
 function extractSqlmapCandidateParams(exchange) {
   const params = [];
   const seen = new Set();
@@ -608,15 +627,19 @@ function buildFindingSignature(finding, exchange) {
   return `${normalizeEndpoint(exchange.request?.url || exchange.response?.url)}::${finding.key}`;
 }
 
-function getHostFromUrl(url) {
-  if (!url) {
+function getHostFromUrl(input) {
+  if (!input) {
     return "";
   }
 
   try {
-    return new URL(url).host;
+    return new URL(input).host;
   } catch {
-    return "";
+    try {
+      return new URL(`https://${input}`).host;
+    } catch {
+      return "";
+    }
   }
 }
 
@@ -982,6 +1005,11 @@ function analyzeSecurityFindings(exchange) {
     responseContentType.includes("text/html") ||
     responseBody.includes("<html") ||
     responseBody.includes("<!DOCTYPE html");
+  const isJsResponse =
+    responseContentType.includes("javascript") ||
+    responseContentType.includes("ecmascript") ||
+    /\.m?js(?:[?#]|$)/i.test(responseUrl || requestUrl);
+  const isSourceMapResponse = /\.m?js\.map(?:[?#]|$)|\.map(?:[?#]|$)/i.test(responseUrl || requestUrl);
   const targetUrl = responseUrl || requestUrl;
   const isHttps = /^https:\/\//i.test(targetUrl);
   const responseSetCookie = getHeader(responseHeaders, "set-cookie");
@@ -1459,6 +1487,163 @@ function analyzeSecurityFindings(exchange) {
     );
   }
 
+  if (isJsResponse && JS_SECRET_LITERAL_REGEX.test(responseBody)) {
+    findings.push(
+      buildFinding({
+        key: "js-secret-literal-exposure",
+        title: "JS 번들에 민감 키/토큰 문자열 노출 가능성",
+        severity: "high",
+        owasp: "A02",
+        area: "JavaScript Response Body",
+        evidence: `JS 응답에서 API key/token/secret 유사 literal이 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          JS_SECRET_LITERAL_REGEX
+        )}`,
+        guide:
+          "프론트엔드 JS 번들은 모든 사용자가 다운로드할 수 있으므로 여기에 비밀키, 장기 토큰, client secret이 포함되면 즉시 노출된 것으로 봐야 합니다. 공개 가능한 publishable key인지 서버 비밀키인지 구분이 필요합니다.",
+        remediation:
+          "비밀키와 장기 토큰은 서버 환경변수/비밀 저장소로 이동하고, 클라이언트에는 공개 가능한 키만 내려주세요. 이미 배포된 키는 회전하고, 번들/소스맵/CDN 캐시에 남은 값을 폐기해야 합니다.",
+        checklist: [
+          "해당 문자열이 공개 가능한 클라이언트 키인지 서버 비밀키인지 식별합니다.",
+          "동일 키가 Git, CDN 캐시, 소스맵, 로그에도 남아 있는지 확인합니다.",
+          "노출된 키는 폐기/회전하고 권한 범위와 사용 이력을 검토합니다."
+        ],
+        confidence: "high"
+      })
+    );
+  }
+
+  if (isJsResponse && JS_DOM_XSS_FLOW_REGEX.test(responseBody)) {
+    findings.push(
+      buildFinding({
+        key: "js-dom-xss-source-to-sink",
+        title: "JS에서 DOM XSS 의심 흐름 감지",
+        severity: "high",
+        owasp: "A03",
+        area: "JavaScript Response Body",
+        evidence: `location/document/window 입력이 HTML 실행 sink로 이어지는 패턴이 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          JS_DOM_XSS_FLOW_REGEX
+        )}`,
+        guide:
+          "URL hash/search, document.referrer, window.name 같은 사용자 제어 입력이 innerHTML/document.write/eval류 sink에 연결되면 DOM 기반 XSS가 발생할 수 있습니다. 실제 실행 경로와 sanitization 여부 확인이 필요합니다.",
+        remediation:
+          "사용자 제어 입력을 HTML로 직접 삽입하지 말고 textContent, 안전한 DOM API, allowlist sanitizer를 사용하세요. URL 파라미터를 HTML/JS 컨텍스트에 넣는 구간은 컨텍스트별 인코딩을 적용해야 합니다.",
+        checklist: [
+          "해당 JS가 로드되는 페이지에서 URL hash/search 값을 조작해 DOM 변경을 확인합니다.",
+          "입력값이 sanitizer를 통과하는지, 우회 가능한 HTML/이벤트 핸들러가 있는지 검증합니다.",
+          "innerHTML/document.write/eval 사용 지점을 안전한 API로 교체 가능한지 점검합니다."
+        ],
+        confidence: "medium"
+      })
+    );
+  } else if (isJsResponse && JS_DANGEROUS_SINK_REGEX.test(responseBody)) {
+    findings.push(
+      buildFinding({
+        key: "js-dangerous-sink-usage",
+        title: "JS 위험 실행/HTML sink 사용",
+        severity: "medium",
+        owasp: "A03",
+        area: "JavaScript Response Body",
+        evidence: `eval, Function, innerHTML, document.write 등 위험 sink가 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          JS_DANGEROUS_SINK_REGEX
+        )}`,
+        guide:
+          "위험 sink 자체가 곧 취약점은 아니지만, 사용자 입력과 결합되면 XSS나 코드 실행으로 이어집니다. 특히 CSP가 약하거나 누락된 페이지에서 악용 가능성이 커집니다.",
+        remediation:
+          "동적 코드 실행을 제거하고, HTML 삽입은 sanitizer와 안전한 DOM API로 제한하세요. 필요한 경우 CSP nonce/hash 기반 정책으로 인라인 실행을 줄이는 것도 병행해야 합니다.",
+        checklist: [
+          "해당 sink에 도달하는 데이터 출처가 URL, API 응답, postMessage, storage인지 추적합니다.",
+          "사용자 입력이 escaping/sanitization 없이 전달되는 경로가 있는지 확인합니다.",
+          "CSP가 위험 sink 악용을 제한할 수 있는 수준인지 함께 점검합니다."
+        ],
+        confidence: "medium"
+      })
+    );
+  }
+
+  if (isJsResponse && JS_POSTMESSAGE_WILDCARD_REGEX.test(responseBody)) {
+    findings.push(
+      buildFinding({
+        key: "js-postmessage-wildcard-target",
+        title: "postMessage 와일드카드 대상 사용",
+        severity: "medium",
+        owasp: "A01",
+        area: "JavaScript Response Body",
+        evidence: `postMessage targetOrigin이 '*'로 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          JS_POSTMESSAGE_WILDCARD_REGEX
+        )}`,
+        guide:
+          "민감 데이터가 포함된 메시지를 `*` 대상으로 보내면 의도하지 않은 창이나 iframe이 메시지를 받을 수 있습니다. 인증 토큰, 사용자 정보, 결제 상태 전달 코드에서 특히 위험합니다.",
+        remediation:
+          "targetOrigin을 정확한 origin allowlist로 제한하고, 수신 측에서도 event.origin과 event.source를 검증하세요. 메시지 payload에는 민감값을 넣지 않는 것이 기본입니다.",
+        checklist: [
+          "postMessage payload에 토큰, 사용자 식별자, 결제/인증 상태가 포함되는지 확인합니다.",
+          "targetOrigin이 고정 allowlist인지, 현재 코드처럼 '*'인지 확인합니다.",
+          "message 이벤트 수신부가 origin/source/schema 검증을 수행하는지 점검합니다."
+        ],
+        confidence: "medium"
+      })
+    );
+  }
+
+  if (
+    (isJsResponse || isSourceMapResponse) &&
+    JS_SOURCE_MAP_REGEX.test(`${requestUrl}\n${responseUrl}\n${responseBody}`)
+  ) {
+    findings.push(
+      buildFinding({
+        key: "js-source-map-exposure",
+        title: "JS Source Map 노출 가능성",
+        severity: "medium",
+        owasp: "A05",
+        area: "JavaScript Response Body/URL",
+        evidence: `sourceMappingURL 또는 .map 파일 경로가 보입니다. Snippet: ${findSnippet(
+          `${requestUrl}\n${responseUrl}\n${responseBody}`,
+          JS_SOURCE_MAP_REGEX
+        )}`,
+        guide:
+          "운영 환경에서 소스맵이 공개되면 원본 소스 구조, 내부 라우트, 주석, 상수, 숨겨진 API 경로가 노출될 수 있습니다. 키가 함께 포함된 경우 위험도가 더 커집니다.",
+        remediation:
+          "운영 배포에서는 소스맵 공개를 비활성화하거나 접근 제어된 저장소로 분리하세요. 이미 노출된 소스맵에 민감정보가 포함되어 있는지도 별도로 검색해야 합니다.",
+        checklist: [
+          ".map URL에 직접 접근 가능한지 확인합니다.",
+          "소스맵 안에 API endpoint, feature flag, secret, 내부 주석이 포함되는지 검색합니다.",
+          "CDN 캐시에 남은 소스맵을 무효화하고 배포 설정을 수정합니다."
+        ],
+        confidence: "high"
+      })
+    );
+  }
+
+  if (isJsResponse && JS_DEBUG_ARTIFACT_REGEX.test(responseBody)) {
+    findings.push(
+      buildFinding({
+        key: "js-debug-artifact",
+        title: "JS 디버그 코드 잔존",
+        severity: "low",
+        owasp: "A05",
+        area: "JavaScript Response Body",
+        evidence: `debugger 또는 console debug/log/trace 코드가 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          JS_DEBUG_ARTIFACT_REGEX
+        )}`,
+        guide:
+          "디버그 코드 자체는 보통 낮은 위험이지만, 로그에 토큰/개인정보/API 응답이 출력되거나 내부 흐름을 노출할 수 있습니다. 운영 번들 품질 관리 관점에서 제거하는 편이 좋습니다.",
+        remediation:
+          "운영 빌드에서 console/debugger 제거 플러그인을 적용하고, 민감 데이터 로깅 여부를 확인하세요. 에러 추적용 로그는 구조화·마스킹된 채널로 제한하는 것이 좋습니다.",
+        checklist: [
+          "console 출력에 사용자 정보, 토큰, API 응답 본문이 포함되는지 확인합니다.",
+          "운영 빌드에서 debugger 문이 제거되는지 확인합니다.",
+          "빌드 파이프라인의 minify/drop_console 설정을 검토합니다."
+        ],
+        confidence: "medium"
+      })
+    );
+  }
+
   if (isHtmlResponse && !getHeader(responseHeaders, "referrer-policy")) {
     findings.push(
       buildFinding({
@@ -1821,6 +2006,11 @@ function getStoredCaptureEvents() {
   return Array.isArray(items) ? items : [];
 }
 
+function getStoredAiSummaries() {
+  const items = getStoredJson(LOCAL_AI_SUMMARIES_KEY, []);
+  return Array.isArray(items) ? items : [];
+}
+
 function buildHarHistoryFingerprint({ fileName, fileSize, summary }) {
   return [
     fileName || "",
@@ -2048,6 +2238,8 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
 
   const snapshot = run.report_snapshot || {};
   const summary = snapshot.summary || {};
+  const aiSummaryRecord = snapshot.aiSummaryMeta || {};
+  const aiSummaryText = snapshot.aiSummary || run.ai_summary || "";
   const conclusion = snapshot.conclusion || buildInspectionConclusion({
     totalFindings: run.total_findings,
     criticalFindings: run.critical_findings,
@@ -2127,6 +2319,16 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
               <span>생성 시각: {formatDateTime(snapshot.exportedAt)}</span>
             </div>
           ) : null}
+          {aiSummaryText ? (
+            <div className="recent-card inspection-modal-wide inspection-ai-summary-card">
+              <strong>OpenAI Summary</strong>
+              <span>
+                {aiSummaryRecord.model ? `${aiSummaryRecord.model} · ` : ""}
+                {formatDateTime(aiSummaryRecord.createdAt || run.ended_at || run.created_at)}
+              </span>
+              <pre>{aiSummaryText}</pre>
+            </div>
+          ) : null}
         </div>
       </div>
     </div>
@@ -2136,9 +2338,12 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
 function MermaidModal({ code, onClose, onCopy }) {
   const [previewSvg, setPreviewSvg] = useState("");
   const [previewError, setPreviewError] = useState("");
+  const [previewZoom, setPreviewZoom] = useState(1);
+  const [previewLoading, setPreviewLoading] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
+    setPreviewZoom(1);
 
     async function renderMermaidPreview() {
       if (!code) {
@@ -2148,6 +2353,10 @@ function MermaidModal({ code, onClose, onCopy }) {
 
       try {
         setPreviewError("");
+        setPreviewLoading(true);
+        const mermaidModule = await import("mermaid");
+        const mermaid = mermaidModule.default;
+
         mermaid.initialize({
           startOnLoad: false,
           securityLevel: "strict",
@@ -2171,6 +2380,10 @@ function MermaidModal({ code, onClose, onCopy }) {
           setPreviewSvg("");
           setPreviewError(error instanceof Error ? error.message : "Mermaid preview render failed.");
         }
+      } finally {
+        if (!cancelled) {
+          setPreviewLoading(false);
+        }
       }
     }
 
@@ -2180,6 +2393,16 @@ function MermaidModal({ code, onClose, onCopy }) {
       cancelled = true;
     };
   }, [code]);
+
+  function handlePreviewWheel(event) {
+    if (!event.metaKey && !event.altKey) {
+      return;
+    }
+
+    event.preventDefault();
+    const nextStep = event.deltaY > 0 ? -0.1 : 0.1;
+    setPreviewZoom((current) => Math.min(2.5, Math.max(0.4, Number((current + nextStep).toFixed(2)))));
+  }
 
   if (!code) {
     return null;
@@ -2201,11 +2424,22 @@ function MermaidModal({ code, onClose, onCopy }) {
           </section>
           <section className="mermaid-panel">
             <strong>Preview</strong>
-            <div className="mermaid-preview-box">
-              {previewError ? (
+            <div
+              className="mermaid-preview-box"
+              onWheel={handlePreviewWheel}
+              title="Cmd 또는 Option을 누른 상태로 휠을 움직이면 확대/축소됩니다."
+            >
+              <div className="mermaid-preview-zoom-chip">Zoom {Math.round(previewZoom * 100)}%</div>
+              {previewLoading ? (
+                <span className="mermaid-preview-loading">Mermaid preview loading...</span>
+              ) : previewError ? (
                 <span className="mermaid-preview-error">{previewError}</span>
               ) : (
-                <div dangerouslySetInnerHTML={{ __html: previewSvg }} />
+                <div
+                  className="mermaid-preview-viewport"
+                  style={{ zoom: previewZoom }}
+                  dangerouslySetInnerHTML={{ __html: previewSvg }}
+                />
               )}
             </div>
           </section>
@@ -2283,6 +2517,8 @@ export default function App() {
   });
   const [exchanges, setExchanges] = useState([]);
   const [errors, setErrors] = useState([]);
+  const deferredExchanges = useDeferredValue(exchanges);
+  const deferredErrors = useDeferredValue(errors);
   const [submitting, setSubmitting] = useState(false);
   const [modalState, setModalState] = useState(null);
   const [replayResponse, setReplayResponse] = useState(null);
@@ -2296,6 +2532,7 @@ export default function App() {
   const [localHarHistory, setLocalHarHistory] = useState(() => getStoredHarHistory());
   const [localInspectionRuns, setLocalInspectionRuns] = useState(() => getStoredInspectionRuns());
   const [localCaptureEvents, setLocalCaptureEvents] = useState(() => getStoredCaptureEvents());
+  const [localAiSummaries, setLocalAiSummaries] = useState(() => getStoredAiSummaries());
   const [selectedHarHistoryKey, setSelectedHarHistoryKey] = useState("");
   const [recentHarAnalyses, setRecentHarAnalyses] = useState([]);
   const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
@@ -2343,28 +2580,31 @@ export default function App() {
   const [apiTestLoading, setApiTestLoading] = useState(false);
   const [apiTestResult, setApiTestResult] = useState(null);
   const [apiTestError, setApiTestError] = useState("");
-  const mergedHarHistory = [
-    ...localHarHistory.map((item) => ({ ...item, historySource: "local" })),
-    ...recentHarAnalyses
-      .map((item) => ({
-        ...item,
-        historySource: "db",
-        fingerprint:
-          item.fingerprint ||
-          buildHarHistoryFingerprint({
-            fileName: item.file_name,
-            fileSize: item.file_size,
-            summary: {
-              totalEntries: item.total_entries,
-              averageWaitMs: item.average_wait_ms,
-              slowestEntry: { url: item.slowest_url }
-            }
-          })
-      }))
-      .filter(
-        (item) => !localHarHistory.some((localItem) => localItem.fingerprint === item.fingerprint)
-      )
-  ];
+  const mergedHarHistory = useMemo(
+    () => [
+      ...localHarHistory.map((item) => ({ ...item, historySource: "local" })),
+      ...recentHarAnalyses
+        .map((item) => ({
+          ...item,
+          historySource: "db",
+          fingerprint:
+            item.fingerprint ||
+            buildHarHistoryFingerprint({
+              fileName: item.file_name,
+              fileSize: item.file_size,
+              summary: {
+                totalEntries: item.total_entries,
+                averageWaitMs: item.average_wait_ms,
+                slowestEntry: { url: item.slowest_url }
+              }
+            })
+        }))
+        .filter(
+          (item) => !localHarHistory.some((localItem) => localItem.fingerprint === item.fingerprint)
+        )
+    ],
+    [localHarHistory, recentHarAnalyses]
+  );
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -2402,112 +2642,187 @@ export default function App() {
     };
   }, []);
 
-  const mergedInspectionRuns = [
-    ...localInspectionRuns.map((item) => ({ ...item, historySource: "local" })),
-    ...recentInspectionRuns
-      .map((item) => ({ ...item, historySource: "db" }))
-      .filter(
-        (item) =>
-          !localInspectionRuns.some(
-            (localItem) =>
-              (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
-              (localItem.target_url || "") === (item.target_url || "") &&
-              (localItem.ended_at || "") === (item.ended_at || "")
+  const mergedInspectionRuns = useMemo(
+    () => [
+      ...localInspectionRuns.map((item) => ({ ...item, historySource: "local" })),
+      ...recentInspectionRuns
+        .map((item) => ({ ...item, historySource: "db" }))
+        .filter(
+          (item) =>
+            !localInspectionRuns.some(
+              (localItem) =>
+                (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
+                (localItem.target_url || "") === (item.target_url || "") &&
+                (localItem.ended_at || "") === (item.ended_at || "")
+            )
+        )
+    ],
+    [localInspectionRuns, recentInspectionRuns]
+  );
+  const mergedCaptureEvents = useMemo(
+    () =>
+      [
+        ...localCaptureEvents.map((item) => ({ ...item, historySource: "local" })),
+        ...recentCaptureEvents
+          .map((item) => ({ ...item, historySource: "db" }))
+          .filter(
+            (item) =>
+              !localCaptureEvents.some(
+                (localItem) =>
+                  (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
+                  (localItem.request_url || "") === (item.request_url || "") &&
+                  (localItem.created_at || "") === (item.created_at || "")
+              )
           )
-      )
-  ];
-  const mergedCaptureEvents = [
-    ...localCaptureEvents.map((item) => ({ ...item, historySource: "local" })),
-    ...recentCaptureEvents
-      .map((item) => ({ ...item, historySource: "db" }))
-      .filter(
-        (item) =>
-          !localCaptureEvents.some(
-            (localItem) =>
-              (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
-              (localItem.request_url || "") === (item.request_url || "") &&
-              (localItem.created_at || "") === (item.created_at || "")
-          )
-      )
-  ].filter((item) => !isAbortedErrorText(item.error_text));
-  const normalizedHarHistory = mergedHarHistory.map((item) => ({
-    ...item,
-    historyKey: `${item.historySource}:${item.id || item.fingerprint || item.created_at || item.file_name}`,
-    displayFileName: item.file_name || item.fileName || "-",
-    displayCreatedAt: item.created_at || item.createdAt || "",
-    summary:
-      item.summary || {
-        totalEntries: item.total_entries ?? 0,
-        averageWaitMs: item.average_wait_ms ?? 0,
-        slowestEntry: { url: item.slowest_url || "-" }
-      }
-  }));
+      ].filter((item) => !isAbortedErrorText(item.error_text)),
+    [localCaptureEvents, recentCaptureEvents]
+  );
+  const normalizedHarHistory = useMemo(
+    () =>
+      mergedHarHistory.map((item) => ({
+        ...item,
+        historyKey: `${item.historySource}:${item.id || item.fingerprint || item.created_at || item.file_name}`,
+        displayFileName: item.file_name || item.fileName || "-",
+        displayCreatedAt: item.created_at || item.createdAt || "",
+        summary:
+          item.summary || {
+            totalEntries: item.total_entries ?? 0,
+            averageWaitMs: item.average_wait_ms ?? 0,
+            slowestEntry: { url: item.slowest_url || "-" }
+          }
+      })),
+    [mergedHarHistory]
+  );
   const selectedHarHistory =
     normalizedHarHistory.find((item) => item.historyKey === selectedHarHistoryKey) || null;
 
-  const liveExcludePatterns = getCombinedExcludePatterns(excludeInput);
+  function getAiSummaryRecordForRun(run) {
+    if (!run) {
+      return null;
+    }
 
-  const analyzedExchanges = exchanges.map((exchange) => ({
-    ...exchange,
-    endpointKey: normalizeEndpoint(exchange.request?.url || exchange.response?.url),
-    securityFindings: analyzeSecurityFindings(exchange).filter(
-      (finding) =>
-        ![...suppressedFindings, ...sessionSuppressedFindings].some((rule) =>
-          matchesSuppressionRule(rule, finding, exchange)
+    const snapshotSummary = run.report_snapshot?.aiSummary || run.ai_summary || "";
+    const snapshotMeta = run.report_snapshot?.aiSummaryMeta || {};
+    if (snapshotSummary) {
+      return {
+        id: snapshotMeta.id || `snapshot-${run.id || run.capture_session_id || run.target_url}`,
+        sessionId: snapshotMeta.sessionId || run.capture_session_id || "",
+        targetUrl: snapshotMeta.targetUrl || run.target_url || "",
+        createdAt: snapshotMeta.createdAt || run.ended_at || run.created_at || "",
+        model: snapshotMeta.model || "",
+        summary: snapshotSummary
+      };
+    }
+
+    return (
+      localAiSummaries.find(
+        (item) =>
+          (run.capture_session_id && item.sessionId === run.capture_session_id) ||
+          (run.id && item.runId === run.id) ||
+          (run.target_url && item.targetUrl === run.target_url)
+      ) || null
+    );
+  }
+
+  const liveExcludePatterns = useMemo(() => getCombinedExcludePatterns(excludeInput), [excludeInput]);
+  const targetHost = useMemo(() => getHostFromUrl(domain), [domain]);
+  const suppressionRules = useMemo(
+    () => [...suppressedFindings, ...sessionSuppressedFindings],
+    [suppressedFindings, sessionSuppressedFindings]
+  );
+  const scopedExchanges = useMemo(
+    () => deferredExchanges.filter((exchange) => isSameTargetHostExchange(exchange, targetHost)),
+    [deferredExchanges, targetHost]
+  );
+
+  const analyzedExchanges = useMemo(
+    () =>
+      scopedExchanges.map((exchange) => ({
+        ...exchange,
+        endpointKey: normalizeEndpoint(exchange.request?.url || exchange.response?.url),
+        securityFindings: analyzeSecurityFindings(exchange).filter(
+          (finding) =>
+            !suppressionRules.some((rule) => matchesSuppressionRule(rule, finding, exchange))
         )
-    )
-  }));
-  const allSecurityFindings = analyzedExchanges.flatMap((exchange) => exchange.securityFindings);
-  const owaspSummary = summarizeFindingsByOwasp(allSecurityFindings);
-  const endpointSummary = summarizeEndpoints(analyzedExchanges);
-  const criticalAlerts = allSecurityFindings.filter((finding) => finding.severity === "critical");
-  const highAlerts = allSecurityFindings.filter((finding) => finding.severity === "high");
-  const periodStats = buildPeriodStats(mergedInspectionRuns);
+      })),
+    [scopedExchanges, suppressionRules]
+  );
+  const allSecurityFindings = useMemo(
+    () => analyzedExchanges.flatMap((exchange) => exchange.securityFindings),
+    [analyzedExchanges]
+  );
+  const owaspSummary = useMemo(
+    () => summarizeFindingsByOwasp(allSecurityFindings),
+    [allSecurityFindings]
+  );
+  const endpointSummary = useMemo(() => summarizeEndpoints(analyzedExchanges), [analyzedExchanges]);
+  const criticalAlerts = useMemo(
+    () => allSecurityFindings.filter((finding) => finding.severity === "critical"),
+    [allSecurityFindings]
+  );
+  const highAlerts = useMemo(
+    () => allSecurityFindings.filter((finding) => finding.severity === "high"),
+    [allSecurityFindings]
+  );
+  const periodStats = useMemo(() => buildPeriodStats(mergedInspectionRuns), [mergedInspectionRuns]);
 
-  const exchangesWithDiffs = analyzedExchanges.map((exchange, index) => {
-    const previous = analyzedExchanges
-      .slice(0, index)
-      .reverse()
-      .find((candidate) => candidate.endpointKey === exchange.endpointKey);
+  const exchangesWithDiffs = useMemo(() => {
+    const previousByEndpoint = new Map();
 
-    return {
-      ...exchange,
-      diffSummary: buildDiffSummary(exchange, previous)
-    };
-  });
+    return analyzedExchanges.map((exchange) => {
+      const previous = previousByEndpoint.get(exchange.endpointKey);
+      previousByEndpoint.set(exchange.endpointKey, exchange);
 
-  const visibleExchanges = exchangesWithDiffs.filter((exchange) => {
-    if (securityOnly && exchange.securityFindings.length === 0) {
-      return false;
-    }
+      return {
+        ...exchange,
+        diffSummary: buildDiffSummary(exchange, previous)
+      };
+    });
+  }, [analyzedExchanges]);
 
-    if (isImageLikeExchange(exchange)) {
-      return false;
-    }
+  const visibleExchanges = useMemo(
+    () =>
+      exchangesWithDiffs.filter((exchange) => {
+        if (securityOnly && exchange.securityFindings.length === 0) {
+          return false;
+        }
 
-    if (liveExcludePatterns.length === 0) return true;
-    const requestUrl = exchange.request?.url || "";
-    const responseUrl = exchange.response?.url || "";
-    return !liveExcludePatterns.some(
-      (pattern) =>
-        (requestUrl && requestUrl.includes(pattern)) ||
-      (responseUrl && responseUrl.includes(pattern))
-    );
-  });
-  const apiCapturedExchanges = exchangesWithDiffs.filter((exchange) => {
-    if (!isApiLikeExchange(exchange)) {
-      return false;
-    }
+        if (isImageLikeExchange(exchange)) {
+          return false;
+        }
 
-    const requestUrl = exchange.request?.url || "";
-    const responseUrl = exchange.response?.url || "";
-    return !liveExcludePatterns.some(
-      (pattern) =>
-        (requestUrl && requestUrl.includes(pattern)) ||
-        (responseUrl && responseUrl.includes(pattern))
-    );
-  });
-  const visibleErrors = errors.filter((item) => !isAbortedErrorText(item?.errorText));
+        if (liveExcludePatterns.length === 0) return true;
+        const requestUrl = exchange.request?.url || "";
+        const responseUrl = exchange.response?.url || "";
+        return !liveExcludePatterns.some(
+          (pattern) =>
+            (requestUrl && requestUrl.includes(pattern)) ||
+            (responseUrl && responseUrl.includes(pattern))
+        );
+      }),
+    [exchangesWithDiffs, liveExcludePatterns, securityOnly]
+  );
+  const apiCapturedExchanges = useMemo(
+    () =>
+      exchangesWithDiffs.filter((exchange) => {
+        if (!isApiLikeExchange(exchange)) {
+          return false;
+        }
+
+        const requestUrl = exchange.request?.url || "";
+        const responseUrl = exchange.response?.url || "";
+        return !liveExcludePatterns.some(
+          (pattern) =>
+            (requestUrl && requestUrl.includes(pattern)) ||
+            (responseUrl && responseUrl.includes(pattern))
+        );
+      }),
+    [exchangesWithDiffs, liveExcludePatterns]
+  );
+  const visibleErrors = useMemo(
+    () => deferredErrors.filter((item) => !isAbortedErrorText(item?.errorText)),
+    [deferredErrors]
+  );
 
   useEffect(() => {
     if (authUser) {
@@ -2707,8 +3022,9 @@ export default function App() {
     const syncLocalQueue = async () => {
       const pendingRuns = localInspectionRuns.filter((item) => item.pending_sync);
       const pendingEvents = localCaptureEvents.filter((item) => item.pending_sync);
+      const pendingSummaries = localAiSummaries.filter((item) => item.pending_sync);
 
-      if (pendingRuns.length === 0 && pendingEvents.length === 0) {
+      if (pendingRuns.length === 0 && pendingEvents.length === 0 && pendingSummaries.length === 0) {
         return;
       }
 
@@ -2774,6 +3090,10 @@ export default function App() {
             setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
           }
         }
+
+        for (const summary of pendingSummaries) {
+          await syncAiSummaryRecord(summary, { refreshRecent: false });
+        }
       } catch {
         return;
       }
@@ -2782,7 +3102,7 @@ export default function App() {
     syncLocalQueue();
     const timer = window.setInterval(syncLocalQueue, 15000);
     return () => window.clearInterval(timer);
-  }, [localInspectionRuns, localCaptureEvents, readOnlyDeployment]);
+  }, [localInspectionRuns, localCaptureEvents, localAiSummaries, readOnlyDeployment]);
 
   useEffect(() => {
     if (!readOnlyDeployment) {
@@ -2837,6 +3157,10 @@ export default function App() {
   }, [localCaptureEvents]);
 
   useEffect(() => {
+    setStoredValue(LOCAL_AI_SUMMARIES_KEY, JSON.stringify(localAiSummaries));
+  }, [localAiSummaries]);
+
+  useEffect(() => {
     setStoredValue(LOCAL_HAR_HISTORY_KEY, JSON.stringify(localHarHistory));
   }, [localHarHistory]);
 
@@ -2866,10 +3190,127 @@ export default function App() {
     );
   }, [sessionSuppressedFindings]);
 
-  async function requestOpenAiSummary(captureInput) {
+  async function refreshRecentAnalysesOnce() {
+    const data = readOnlyDeployment
+      ? await loadRecentFromSupabase()
+      : await fetch(`${API_BASE_URL}/api/recent-analyses`).then(async (response) => {
+          if (!response.ok) {
+            return {
+              harAnalyses: [],
+              captureEvents: [],
+              inspectionRuns: []
+            };
+          }
+
+          return response.json();
+        });
+
+    setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
+    setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
+    setRecentInspectionRuns(Array.isArray(data.inspectionRuns) ? data.inspectionRuns : []);
+  }
+
+  async function syncAiSummaryRecord(summaryRecord, options = {}) {
+    if (readOnlyDeployment || !summaryRecord?.summary) {
+      return false;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/api/inspection-runs/summary`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        capture_session_id: summaryRecord.sessionId || null,
+        target_url: summaryRecord.targetUrl || "",
+        summary: summaryRecord.summary,
+        summary_meta: {
+          id: summaryRecord.id,
+          sessionId: summaryRecord.sessionId || "",
+          targetUrl: summaryRecord.targetUrl || "",
+          createdAt: summaryRecord.createdAt || "",
+          source: summaryRecord.source || "",
+          model: summaryRecord.model || "",
+          totalExchanges: summaryRecord.totalExchanges || 0,
+          totalErrors: summaryRecord.totalErrors || 0
+        }
+      })
+    });
+
+    if (!response.ok) {
+      return false;
+    }
+
+    setLocalAiSummaries((current) => current.filter((item) => item.id !== summaryRecord.id));
+
+    if (options.refreshRecent !== false) {
+      await refreshRecentAnalysesOnce().catch(() => null);
+    }
+
+    return true;
+  }
+
+  function persistAiSummary(summaryText, captureInput = {}, context = {}) {
+    const sessionId = context.sessionId || captureInput?.sessionId || captureSessionId || "";
+    const targetUrl =
+      context.targetUrl || captureInput?.targetUrl || domain || getStoredValue("http-analyzer-domain") || "";
+    const createdAt = new Date().toISOString();
+    const fallbackId = `summary-${Date.now()}`;
+    const id = context.id || sessionId || fallbackId;
+    const summaryRecord = {
+      id,
+      runId: context.runId || "",
+      sessionId,
+      targetUrl,
+      createdAt,
+      source: context.source || "manual",
+      model: openAiModel.trim() || "gpt-4.1-mini",
+      totalExchanges: Array.isArray(captureInput?.exchanges) ? captureInput.exchanges.length : 0,
+      totalErrors: Array.isArray(captureInput?.errors) ? captureInput.errors.length : 0,
+      pending_sync: !readOnlyDeployment,
+      summary: summaryText
+    };
+
+    setLocalAiSummaries((current) =>
+      [
+        summaryRecord,
+        ...current.filter(
+          (item) =>
+            item.id !== summaryRecord.id &&
+            (!summaryRecord.sessionId || item.sessionId !== summaryRecord.sessionId)
+        )
+      ].slice(0, 50)
+    );
+
+    if (summaryRecord.sessionId || summaryRecord.runId) {
+      setLocalInspectionRuns((current) =>
+        current.map((run) => {
+          const matchedBySession =
+            summaryRecord.sessionId && run.capture_session_id === summaryRecord.sessionId;
+          const matchedByRun = summaryRecord.runId && run.id === summaryRecord.runId;
+
+          if (!matchedBySession && !matchedByRun) {
+            return run;
+          }
+
+          return {
+            ...run,
+            ai_summary: summaryText,
+            report_snapshot: {
+              ...(run.report_snapshot || {}),
+              aiSummary: summaryText,
+              aiSummaryMeta: summaryRecord
+            }
+          };
+        })
+      );
+    }
+
+    void syncAiSummaryRecord(summaryRecord).catch(() => null);
+  }
+
+  async function requestOpenAiSummary(captureInput, summaryContext = {}) {
     if (!openAiKey.trim()) {
       setAiSummaryError("OpenAI API Key가 없어 Summary를 생성하지 않았습니다.");
-      return;
+      return "";
     }
 
     setAiSummaryLoading(true);
@@ -2892,17 +3333,22 @@ export default function App() {
         throw new Error(data?.error || rawText || "OpenAI Summary 생성에 실패했습니다.");
       }
 
-      setAiSummary(data?.summary || "(empty summary)");
+      const summaryText = data?.summary || "(empty summary)";
+      setAiSummary(summaryText);
+      persistAiSummary(summaryText, captureInput, summaryContext);
+      return summaryText;
     } catch (error) {
       setAiSummaryError(error instanceof Error ? error.message : "OpenAI Summary 생성에 실패했습니다.");
+      return "";
     } finally {
       setAiSummaryLoading(false);
     }
   }
 
-  async function requestCaptureCompletionSummary(captureInput, sessionId) {
+  async function requestCaptureCompletionSummary(captureInput, sessionId, summaryContext = {}) {
     const summaryKey =
       sessionId ||
+      summaryContext.runId ||
       `${captureInput?.targetUrl || "capture"}-${captureInput?.exchanges?.length || 0}-${
         captureInput?.errors?.length || 0
       }`;
@@ -2912,7 +3358,11 @@ export default function App() {
     }
 
     summarizedSessionRef.current = summaryKey;
-    await requestOpenAiSummary(captureInput);
+    await requestOpenAiSummary(captureInput, {
+      ...summaryContext,
+      sessionId: sessionId || "",
+      source: "capture-complete"
+    });
   }
 
   async function runSqlmapScan(event) {
@@ -3276,7 +3726,8 @@ export default function App() {
           exchanges: analyzedExchanges,
           errors
         },
-        captureSessionId || localRun.id
+        captureSessionId || "",
+        { runId: localRun.id }
       );
       setStatusMessage("");
       setActive(false);
@@ -3469,6 +3920,8 @@ export default function App() {
     const reportEndpointSummary = reportInput.endpointSummary ?? endpointSummary;
     const reportInspector = reportInput.inspector ?? authUser?.email ?? "-";
     const reportExportedAt = reportInput.exportedAt ?? new Date().toISOString();
+    const reportAiSummary = reportInput.aiSummary || "";
+    const reportAiSummaryMeta = reportInput.aiSummaryMeta || {};
     const reportConclusion =
       reportInput.conclusion ||
       buildInspectionConclusion({
@@ -3577,6 +4030,9 @@ export default function App() {
     .hero{padding:20px 24px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
     .hero h1{margin:0 0 8px;font-size:28px}
     .hero p{margin:4px 0;color:#475569}
+    .ai-summary{margin-top:16px;padding:16px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
+    .ai-summary h2{margin:0 0 8px;font-size:20px;color:#172033}
+    .ai-summary p{margin:0 0 12px;color:#64748b;font-size:13px}
     .pair-card{margin-top:16px;padding:16px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 10px 24px rgba(15,23,42,.06)}
     .pair-index{margin-bottom:10px;font-weight:700;color:#64748b}
     .pair-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
@@ -3630,6 +4086,19 @@ export default function App() {
         reportEndpointSummary.slice(0, 3).map((item) => item.endpoint).join(", ") || "-"
       )}</p>
     </section>
+    ${
+      reportAiSummary
+        ? `<section class="ai-summary">
+            <h2>OpenAI Summary</h2>
+            <p>${escapeHtml(
+              `${reportAiSummaryMeta.model ? `${reportAiSummaryMeta.model} · ` : ""}${formatDateTime(
+                reportAiSummaryMeta.createdAt || reportExportedAt
+              )}`
+            )}</p>
+            <pre>${escapeHtml(reportAiSummary)}</pre>
+          </section>`
+        : ""
+    }
     ${sections}
   </div>
 </body>
@@ -3656,6 +4125,12 @@ export default function App() {
       }),
       owaspSummary,
       endpointSummary,
+      aiSummary,
+      aiSummaryMeta:
+        getAiSummaryRecordForRun({
+          capture_session_id: captureSessionId,
+          target_url: domain || getStoredValue("http-analyzer-domain") || ""
+        }) || null,
       summary: {
         visiblePairs: visibleExchanges.length,
         totalFindings: allSecurityFindings.length
@@ -3893,7 +4368,54 @@ window.addEventListener("load", () => {
   }
 
   function openInspectionRun(run) {
-    setInspectionModalRun(run);
+    const summaryRecord = getAiSummaryRecordForRun(run);
+    setInspectionModalRun(
+      summaryRecord
+        ? {
+            ...run,
+            ai_summary: summaryRecord.summary,
+            report_snapshot: {
+              ...(run.report_snapshot || {}),
+              aiSummary: summaryRecord.summary,
+              aiSummaryMeta: summaryRecord
+            }
+          }
+        : run
+    );
+  }
+
+  function getInspectionReportSnapshot(run) {
+    const baseSnapshot =
+      run.report_snapshot && Object.keys(run.report_snapshot).length > 0
+        ? run.report_snapshot
+        : {
+            domain: run.target_url,
+            excluded: run.excluded_patterns || [],
+            securityOnly: run.security_only,
+            maskSensitive: run.mask_sensitive,
+            inspector: authUser?.email || "-",
+            exportedAt: run.ended_at || run.created_at,
+            conclusion: buildInspectionConclusion({
+              totalFindings: run.total_findings,
+              criticalFindings: run.critical_findings,
+              highFindings: run.high_findings,
+              totalErrors: run.total_errors
+            }),
+            owaspSummary: run.owasp_summary || [],
+            endpointSummary: run.endpoint_summary || [],
+            exchanges: []
+          };
+    const summaryRecord = getAiSummaryRecordForRun(run);
+
+    if (!summaryRecord?.summary) {
+      return baseSnapshot;
+    }
+
+    return {
+      ...baseSnapshot,
+      aiSummary: summaryRecord.summary,
+      aiSummaryMeta: summaryRecord
+    };
   }
 
   const findingEntries = visibleExchanges.flatMap((exchange) =>
@@ -4175,7 +4697,7 @@ window.addEventListener("load", () => {
                 <form className="capture-form filter-bar" onSubmit={startCapture}>
                   <div className="capture-filter-row">
                     <label className="field-label field-card">
-                      <span>URL:</span>
+                      <span>Domain:</span>
                       <input
                         type="text"
                         placeholder="도메인 입력"
@@ -4513,98 +5035,74 @@ window.addEventListener("load", () => {
                     ))}
                 </div>
                 <div className="recent-capture-panel section-panel">
-                  <strong>Recent Inspection Runs</strong>
-                  <div className="recent-list">
+                  <div className="recent-section-header">
+                    <strong>Recent Inspection Runs</strong>
+                    <span>최근 점검 이력을 한 행 단위로 정리했습니다.</span>
+                  </div>
+                  <div className="inspection-run-table">
                     {mergedInspectionRuns.length === 0 ? (
                       <span className="empty-copy">
                         {recentLoading ? "불러오는 중..." : "최근 점검 이력이 없습니다."}
                       </span>
                     ) : (
-                      mergedInspectionRuns.map((item) => (
-                        <div key={item.id} className="recent-card">
-                          <strong>{item.target_url || "-"}</strong>
-                          <span>
-                            출처:{" "}
-                            {item.historySource === "local"
-                              ? item.pending_sync
-                                ? "로컬(대기)"
-                                : "로컬"
-                              : "DB"}
-                          </span>
-                          <span>
-                            점검 시간: {formatDateTime(item.started_at)} ~ {formatDateTime(item.ended_at)}
-                          </span>
-                          <span>세션: {item.capture_session_id || "-"}</span>
-                          <span>
-                            요청 {item.total_exchanges}건 / 에러 {item.total_errors}건 / Finding{" "}
-                            {item.total_findings}건
-                          </span>
-                          <span>
-                            Critical {item.critical_findings} / High {item.high_findings}
-                          </span>
-                          <div className="action-row">
-                            <button type="button" onClick={() => openInspectionRun(item)}>
-                              상세 보기
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadHtmlReport(
-                                  item.report_snapshot && Object.keys(item.report_snapshot).length > 0
-                                    ? item.report_snapshot
-                                    : {
-                                        domain: item.target_url,
-                                        excluded: item.excluded_patterns || [],
-                                        securityOnly: item.security_only,
-                                        maskSensitive: item.mask_sensitive,
-                                        inspector: authUser?.email || "-",
-                                        exportedAt: item.ended_at || item.created_at,
-                                        conclusion: buildInspectionConclusion({
-                                          totalFindings: item.total_findings,
-                                          criticalFindings: item.critical_findings,
-                                          highFindings: item.high_findings,
-                                          totalErrors: item.total_errors
-                                        }),
-                                        owaspSummary: item.owasp_summary || [],
-                                        endpointSummary: item.endpoint_summary || [],
-                                        exchanges: []
-                                      }
-                                )
-                              }
-                            >
-                              HTML 재다운로드
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                downloadPdfReport(
-                                  item.report_snapshot && Object.keys(item.report_snapshot).length > 0
-                                    ? item.report_snapshot
-                                    : {
-                                        domain: item.target_url,
-                                        excluded: item.excluded_patterns || [],
-                                        securityOnly: item.security_only,
-                                        maskSensitive: item.mask_sensitive,
-                                        inspector: authUser?.email || "-",
-                                        exportedAt: item.ended_at || item.created_at,
-                                        conclusion: buildInspectionConclusion({
-                                          totalFindings: item.total_findings,
-                                          criticalFindings: item.critical_findings,
-                                          highFindings: item.high_findings,
-                                          totalErrors: item.total_errors
-                                        }),
-                                        owaspSummary: item.owasp_summary || [],
-                                        endpointSummary: item.endpoint_summary || [],
-                                        exchanges: []
-                                      }
-                                )
-                              }
-                            >
-                              PDF 재다운로드
-                            </button>
+                      mergedInspectionRuns.map((item) => {
+                        const summaryRecord = getAiSummaryRecordForRun(item);
+
+                        return (
+                          <div key={item.id} className="inspection-run-item">
+                            <div className="inspection-run-row">
+                              <div className="inspection-run-main">
+                                <strong>{item.target_url || "-"}</strong>
+                                <div className="inspection-run-meta">
+                                  <span>{formatDateTime(item.started_at)} ~ {formatDateTime(item.ended_at)}</span>
+                                  <span>
+                                    {item.historySource === "local"
+                                      ? item.pending_sync
+                                        ? "로컬(대기)"
+                                        : "로컬"
+                                      : "DB"}
+                                  </span>
+                                  <span>세션 {item.capture_session_id || "-"}</span>
+                                </div>
+                              </div>
+                              <div className="inspection-run-metrics">
+                                <span>요청 {item.total_exchanges}건</span>
+                                <span>에러 {item.total_errors}건</span>
+                                <span>Finding {item.total_findings}건</span>
+                              </div>
+                              <div className="inspection-run-risk">
+                                <span className="risk-chip risk-critical">Critical {item.critical_findings}</span>
+                                <span className="risk-chip risk-high">High {item.high_findings}</span>
+                              </div>
+                              <div className="inspection-run-actions">
+                                <button type="button" onClick={() => openInspectionRun(item)}>
+                                  상세 보기
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => downloadHtmlReport(getInspectionReportSnapshot(item))}
+                                >
+                                  HTML 재다운로드
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => downloadPdfReport(getInspectionReportSnapshot(item))}
+                                >
+                                  PDF 재다운로드
+                                </button>
+                              </div>
+                            </div>
+                            {summaryRecord?.summary ? (
+                              <details className="inspection-summary-details">
+                                <summary>
+                                  OpenAI Summary · {formatDateTime(summaryRecord.createdAt)}
+                                </summary>
+                                <pre>{summaryRecord.summary}</pre>
+                              </details>
+                            ) : null}
                           </div>
-                        </div>
-                      ))
+                        );
+                      })
                     )}
                   </div>
                   <strong>Recent Capture Events</strong>
@@ -4763,7 +5261,7 @@ window.addEventListener("load", () => {
                             }`}
                             onClick={() => loadSqlmapFromExchange(exchange)}
                           >
-                            <span>{exchange.request?.method || "GET"}</span>
+                            <span className="candidate-method">{exchange.request?.method || "GET"}</span>
                             <div className="candidate-main">
                               <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
                               <small>
@@ -4867,6 +5365,41 @@ window.addEventListener("load", () => {
                     </div>
                   </form>
                   {apiTestError ? <div className="error-strip">{apiTestError}</div> : null}
+                  {apiTestResult ? (
+                    <div className="api-test-result-grid">
+                      <div className="tool-result">
+                        <strong>Request</strong>
+                        <span>
+                          {apiTestForm.method} {apiTestForm.url || "-"}
+                        </span>
+                        <CodeBlock
+                          sections={[
+                            { label: "Headers", content: apiTestForm.headers || "(empty)" },
+                            {
+                              label: "Body",
+                              content: ["GET", "HEAD", "DELETE"].includes(apiTestForm.method)
+                                ? "(not sent)"
+                                : apiTestForm.body || "(empty)"
+                            }
+                          ]}
+                          maskSensitive={maskSensitive}
+                        />
+                      </div>
+                      <div className="tool-result">
+                        <strong>Response</strong>
+                        <span>
+                          {apiTestResult.status} {apiTestResult.statusText || ""}
+                        </span>
+                        <CodeBlock
+                          sections={[
+                            { label: "Headers", content: prettyJson(apiTestResult.headers) },
+                            { label: "Body", content: apiTestResult.body || "(empty)" }
+                          ]}
+                          maskSensitive={maskSensitive}
+                        />
+                      </div>
+                    </div>
+                  ) : null}
                   {apiCapturedExchanges.length > 0 ? (
                     <div className="candidate-list">
                       <strong>Captured Requests ({apiCapturedExchanges.length})</strong>
@@ -4878,24 +5411,15 @@ window.addEventListener("load", () => {
                           onClick={() => loadApiTestFromExchange(exchange)}
                         >
                           <span>{exchange.request?.method || "GET"}</span>
-                          <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
+                          <div className="candidate-main">
+                            <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
+                            <small>
+                              {exchange.request?.resourceType || "request"} ·{" "}
+                              {exchange.response?.status || "pending"}
+                            </small>
+                          </div>
                         </button>
                       ))}
-                    </div>
-                  ) : null}
-                  {apiTestResult ? (
-                    <div className="tool-result">
-                      <strong>API Response</strong>
-                      <span>
-                        {apiTestResult.status} {apiTestResult.statusText || ""}
-                      </span>
-                      <CodeBlock
-                        sections={[
-                          { label: "Headers", content: prettyJson(apiTestResult.headers) },
-                          { label: "Body", content: apiTestResult.body || "(empty)" }
-                        ]}
-                        maskSensitive={maskSensitive}
-                      />
                     </div>
                   ) : null}
                 </div>
@@ -4945,11 +5469,17 @@ window.addEventListener("load", () => {
                       type="button"
                       disabled={aiSummaryLoading || !openAiKey.trim()}
                       onClick={() =>
-                        requestOpenAiSummary({
-                          targetUrl: domain || "",
-                          exchanges: analyzedExchanges,
-                          errors
-                        })
+                        requestOpenAiSummary(
+                          {
+                            targetUrl: domain || "",
+                            exchanges: analyzedExchanges,
+                            errors
+                          },
+                          {
+                            sessionId: captureSessionId || "",
+                            source: "manual"
+                          }
+                        )
                       }
                     >
                       {aiSummaryLoading ? "Summary 생성 중..." : "현재 데이터로 Summary 생성"}
@@ -5085,7 +5615,7 @@ window.addEventListener("load", () => {
                 <div className="entry-list">
                   {visibleExchanges.length === 0 ? (
                     <div className="empty-state-card">
-                      아직 캡처된 요청이 없습니다. URL을 입력하고 캡처를 시작해보세요.
+                      아직 캡처된 요청이 없습니다. Domain을 입력하고 캡처를 시작해보세요.
                     </div>
                   ) : (
                     visibleExchanges
