@@ -3,7 +3,7 @@ services:
     name: http-analyzer-api
     runtime: node
     plan: free
-    buildCommand: npm ci
+    buildCommand: npm ci && npx playwright install chromium
     startCommand: npm run start
     healthCheckPath: /api/health
     envVars:
@@ -12,8 +12,8 @@ services:
       - key: HOST
         value: 0.0.0.0
       - key: DISABLE_CAPTURE
-        value: "true"
-      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+        value: "false"
+      - key: PLAYWRIGHT_HEADLESS
         value: "true"
       - key: SUPABASE_URL
         sync: false

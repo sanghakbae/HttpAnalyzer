@@ -23,6 +23,8 @@ app.use(express.json({ limit: "4mb" }));
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 const disableCapture = process.env.DISABLE_CAPTURE === "true";
+const playwrightHeadless =
+  process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -367,8 +369,10 @@ async function launchCaptureSession(domain, excludePatterns = []) {
   resetCaptureCollections();
 
   const browser = await chromium.launch({
-    headless: false,
+    headless: playwrightHeadless,
     args: [
+      "--no-sandbox",
+      "--disable-dev-shm-usage",
       `--window-size=${popupWidth},${popupHeight}`,
       `--window-position=${windowX},${windowY}`
     ]

@@ -387,18 +387,18 @@ Render Web Service에는 아래 값을 등록합니다.
 ```text
 NODE_ENV=production
 HOST=0.0.0.0
-DISABLE_CAPTURE=true
-PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=true
+DISABLE_CAPTURE=false
+PLAYWRIGHT_HEADLESS=true
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 ```
 
-현재 권장 운영 방식은 배포 백엔드를 저장/조회 API로만 쓰는 것입니다.
+배포 백엔드에서도 캡처 API를 사용할 수 있도록 `DISABLE_CAPTURE=false`로 둡니다.
 
-- 동작: `/api/health`, `/api/recent-analyses`, `/api/inspection-runs`, `/api/capture-events/batch`, `/api/analyze-har`
-- 비활성화: `/api/capture/start`
+- 동작: `/api/health`, `/api/capture/start`, `/api/capture/status`, `/api/capture/stop`, `/api/replay-request`, `/api/recent-analyses`, `/api/inspection-runs`, `/api/capture-events/batch`, `/api/analyze-har`
+- Render에서는 `PLAYWRIGHT_HEADLESS=true`로 서버 내부 headless Chromium을 실행합니다.
 
-실제 브라우저 캡처와 Replay는 로컬 앱에서 사용하는 것을 권장합니다.
+주의: Render에서 실행되는 브라우저는 사용자 PC가 아니라 Render 서버 내부 브라우저입니다. 사람이 직접 로그인하고 조작하는 세션 캡처는 로컬 앱에서 실행하는 것이 가장 정확합니다.
 
 ### Render Blueprint
 
@@ -418,7 +418,7 @@ Render에서 서비스 이름이 이미 사용 중이면 실제 생성된 URL을
 
 - `Overview`, `Capture`, `Findings`, `HAR`, `Recent Data` 메뉴 표시
 - `HAR` 업로드, `Replay`, 리포트 출력은 백엔드 API URL을 통해 실행
-- Render 환경에서 `DISABLE_CAPTURE=true`로 둔 경우 실시간 브라우저 캡처 시작만 서버에서 차단
+- Render 환경에서는 headless Chromium으로 캡처가 실행됨
 - 실제 브라우저 창을 띄워 세션을 이어가는 캡처는 로컬 앱에서 실행하는 것을 권장
 
 ### 현재 워크스페이스 상태
