@@ -276,6 +276,21 @@ input {
   min-height: 44px;
 }
 
+.local-dev-login-button {
+  justify-self: start;
+  padding: 8px 14px;
+  border-radius: 999px;
+  border: 1px solid rgba(159, 182, 255, 0.4);
+  background: rgba(255, 255, 255, 0.08);
+  color: #e5edff;
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.local-dev-login-button:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .hero-card,
 .panel {
   border: 1px solid var(--card-border);

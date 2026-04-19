@@ -1725,6 +1725,7 @@ async function readJsonSafely(response) {
 function LoginScreen({ onLogin }) {
   const [loginError, setLoginError] = useState("");
   const loginShellRef = useRef(null);
+  const showLocalDevLogin = isLocalRuntime();
 
   useEffect(() => {
     let cancelled = false;
@@ -1808,6 +1809,16 @@ function LoginScreen({ onLogin }) {
     };
   }, [onLogin]);
 
+  function handleLocalDevLogin() {
+    onLogin({
+      id: "local-dev",
+      email: ALLOWED_GOOGLE_EMAIL,
+      name: "Local Developer",
+      picture: "",
+      credential: "local-dev"
+    });
+  }
+
   return (
     <main ref={loginShellRef} className="login-shell">
       <section className="login-card">
@@ -1822,6 +1833,11 @@ function LoginScreen({ onLogin }) {
         </p>
         <div className="login-actions">
           <div id="google-login-button" className="google-login-button" />
+          {showLocalDevLogin ? (
+            <button type="button" className="local-dev-login-button" onClick={handleLocalDevLogin}>
+              로컬 개발 로그인
+            </button>
+          ) : null}
           {loginError ? <div className="error-strip">{loginError}</div> : null}
         </div>
       </section>
@@ -3190,10 +3206,6 @@ window.addEventListener("load", () => {
     setInspectionModalRun(run);
   }
 
-  if (!authUser) {
-    return <LoginScreen onLogin={handleLogin} />;
-  }
-
   const findingEntries = visibleExchanges.flatMap((exchange) =>
     (exchange.securityFindings || []).map((finding) => ({ exchange, finding }))
   );
@@ -3265,6 +3277,10 @@ window.addEventListener("load", () => {
 
     return () => window.clearTimeout(timer);
   }, [activeSection, focusedFindingExchangeId, displayedFindingEntries.length]);
+
+  if (!authUser) {
+    return <LoginScreen onLogin={handleLogin} />;
+  }
 
   return (
     <main ref={appShellRef} className="page-shell">
