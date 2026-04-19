@@ -52,6 +52,8 @@ const captureState = {
   errors: []
 };
 
+const memoryRecentCaptureEvents = [];
+
 function resetCaptureCollections() {
   captureState.exchanges = [];
   captureState.errors = [];
@@ -64,6 +66,16 @@ function trimCollection(collection, max = 250) {
   if (collection.length > max) {
     collection.splice(0, collection.length - max);
   }
+}
+
+function rememberCaptureEvent(payload, reason = "memory") {
+  memoryRecentCaptureEvents.unshift({
+    id: `memory-event-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    created_at: new Date().toISOString(),
+    storage_reason: reason,
+    ...payload
+  });
+  trimCollection(memoryRecentCaptureEvents, 50);
 }
 
 function sleep(ms) {
@@ -176,12 +188,14 @@ async function saveAnalysisRecord(payload) {
 
 async function saveCaptureRecord(payload) {
   if (!supabase) {
+    rememberCaptureEvent(payload, "Supabase credentials are not configured.");
     return { saved: false, reason: "Supabase credentials are not configured." };
   }
 
   const { error } = await supabase.from("capture_http_events").insert(payload);
 
   if (error) {
+    rememberCaptureEvent(payload, error.message);
     return { saved: false, reason: error.message };
   }
 
@@ -819,7 +833,10 @@ app.get("/api/recent-analyses", async (_request, response) => {
 
   response.json({
     harAnalyses: harAnalyses.status === "fulfilled" ? harAnalyses.value : [],
-    captureEvents: captureEvents.status === "fulfilled" ? captureEvents.value : [],
+    captureEvents: [
+      ...memoryRecentCaptureEvents,
+      ...(captureEvents.status === "fulfilled" ? captureEvents.value : [])
+    ].slice(0, 50),
     inspectionRuns: inspectionRuns.status === "fulfilled" ? inspectionRuns.value : [],
     partialErrors: errors
   });
