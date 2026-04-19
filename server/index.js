@@ -800,23 +800,29 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
 });
 
 app.get("/api/recent-analyses", async (_request, response) => {
-  try {
-    const [harAnalyses, captureEvents, inspectionRuns] = await Promise.all([
-      loadRecentHarAnalyses(10),
-      loadRecentCaptureEvents(20),
-      loadRecentInspectionRuns(15)
-    ]);
+  const [harAnalyses, captureEvents, inspectionRuns] = await Promise.allSettled([
+    loadRecentHarAnalyses(10),
+    loadRecentCaptureEvents(20),
+    loadRecentInspectionRuns(15)
+  ]);
 
-    response.json({
-      harAnalyses,
-      captureEvents,
-      inspectionRuns
+  const errors = [harAnalyses, captureEvents, inspectionRuns]
+    .filter((item) => item.status === "rejected")
+    .map((item) => {
+      const reason = item.reason;
+      return reason instanceof Error ? reason.message : reason?.message || String(reason);
     });
-  } catch (error) {
-    response.status(500).json({
-      error: error instanceof Error ? error.message : "Failed to load recent analyses"
-    });
+
+  if (errors.length > 0) {
+    console.warn("Recent analyses partial load failure:", errors.join(" | "));
   }
+
+  response.json({
+    harAnalyses: harAnalyses.status === "fulfilled" ? harAnalyses.value : [],
+    captureEvents: captureEvents.status === "fulfilled" ? captureEvents.value : [],
+    inspectionRuns: inspectionRuns.status === "fulfilled" ? inspectionRuns.value : [],
+    partialErrors: errors
+  });
 });
 
 const port = process.env.PORT || 4000;
