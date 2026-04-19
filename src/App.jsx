@@ -2044,6 +2044,8 @@ export default function App() {
   const [excludeInput, setExcludeInput] = useState(() =>
     getStoredValue("http-analyzer-exclude-patterns")
   );
+  const [loginId, setLoginId] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
   const [securityOnly, setSecurityOnly] = useState(
     () => getStoredValue("http-analyzer-security-only") === "true"
   );
@@ -2082,7 +2084,10 @@ export default function App() {
     crawlCompleted: false,
     crawlVisited: [],
     crawlQueueLength: 0,
-    crawlMaxPages: 0
+    crawlMaxPages: 0,
+    loginAttempted: false,
+    loginStatus: "skipped",
+    loginError: ""
   });
   const [exchanges, setExchanges] = useState([]);
   const [errors, setErrors] = useState([]);
@@ -2321,7 +2326,10 @@ export default function App() {
           crawlCompleted: Boolean(data.crawlCompleted),
           crawlVisited: Array.isArray(data.crawlVisited) ? data.crawlVisited : [],
           crawlQueueLength: Number(data.crawlQueueLength || 0),
-          crawlMaxPages: Number(data.crawlMaxPages || 0)
+          crawlMaxPages: Number(data.crawlMaxPages || 0),
+          loginAttempted: Boolean(data.loginAttempted),
+          loginStatus: data.loginStatus || "skipped",
+          loginError: data.loginError || ""
         });
         setExchanges(data.exchanges || []);
         setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
@@ -2576,10 +2584,18 @@ export default function App() {
         ? getCombinedExcludePatterns(excludeInput)
         : [...FIXED_EXCLUDE_PATTERNS];
 
+      const credentials =
+        loginId.trim() && loginPassword
+          ? {
+              username: loginId.trim(),
+              password: loginPassword
+            }
+          : null;
+
       const response = await fetch(`${API_BASE_URL}/api/capture/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain, excludePatterns })
+        body: JSON.stringify({ domain, excludePatterns, credentials })
       });
 
       const { data, rawText } = await readJsonSafely(response);
@@ -2598,7 +2614,10 @@ export default function App() {
         crawlCompleted: false,
         crawlVisited: [],
         crawlQueueLength: 0,
-        crawlMaxPages: Number(result.crawlMaxPages || 0)
+        crawlMaxPages: Number(result.crawlMaxPages || 0),
+        loginAttempted: Boolean(result.loginAttempted),
+        loginStatus: result.loginStatus || "skipped",
+        loginError: result.loginError || ""
       });
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
@@ -3344,6 +3363,9 @@ window.addEventListener("load", () => {
       : captureMeta.stopReason === "crawl-error"
         ? "error"
         : "idle";
+  const loginStateLabel = captureMeta.loginAttempted
+    ? captureMeta.loginStatus || "attempting"
+    : "no login";
   const captureProgressPercent = active
     ? captureMeta.crawlMaxPages > 0
       ? Math.min(96, Math.max(12, (crawledPageCount / captureMeta.crawlMaxPages) * 100))
@@ -3474,6 +3496,7 @@ window.addEventListener("load", () => {
                 <span>
                   {crawledPageCount}/{captureMeta.crawlMaxPages || "-"} pages
                 </span>
+                <span>login {loginStateLabel}</span>
                 <span>{captureErrorCount} errors</span>
               </div>
             </div>
@@ -3590,8 +3613,30 @@ window.addEventListener("load", () => {
                       onChange={(event) => setExcludeInput(event.target.value)}
                     />
                   </label>
+                  <div className="credential-fields">
+                    <label className="field-label field-card">
+                      <span>ID:</span>
+                      <input
+                        type="text"
+                        autoComplete="username"
+                        placeholder="로그인 ID 또는 이메일"
+                        value={loginId}
+                        onChange={(event) => setLoginId(event.target.value)}
+                      />
+                    </label>
+                    <label className="field-label field-card">
+                      <span>PW:</span>
+                      <input
+                        type="password"
+                        autoComplete="current-password"
+                        placeholder="비밀번호"
+                        value={loginPassword}
+                        onChange={(event) => setLoginPassword(event.target.value)}
+                      />
+                    </label>
+                  </div>
                   <p className="field-hint">
-                    이미지 요청은 항상 제외됩니다. 여기에 입력하는 값은 추가 제외 패턴입니다.
+                    이미지 요청은 항상 제외됩니다. ID/PW는 로그인 자동 입력에만 사용하며 저장하지 않습니다.
                   </p>
                   <div className="action-row action-card">
                     <button type="submit" disabled={submitting || active}>

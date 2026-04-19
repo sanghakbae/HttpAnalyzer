@@ -30,6 +30,7 @@ const captureIdleAutoStopMs = Number(process.env.CAPTURE_IDLE_AUTO_STOP_MS || 10
 const captureCrawlEnabled = process.env.CAPTURE_CRAWL_ENABLED !== "false";
 const captureCrawlMaxPages = Number(process.env.CAPTURE_CRAWL_MAX_PAGES || 8);
 const captureCrawlPageDelayMs = Number(process.env.CAPTURE_CRAWL_PAGE_DELAY_MS || 1500);
+const captureLoginWaitMs = Number(process.env.CAPTURE_LOGIN_WAIT_MS || 3000);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -56,6 +57,9 @@ const captureState = {
   crawlVisited: [],
   crawlQueue: [],
   crawlMaxPages: captureCrawlMaxPages,
+  loginAttempted: false,
+  loginStatus: "skipped",
+  loginError: "",
   exchanges: [],
   errors: []
 };
@@ -73,6 +77,9 @@ function resetCaptureCollections() {
   captureState.crawlVisited = [];
   captureState.crawlQueue = [];
   captureState.crawlMaxPages = captureCrawlMaxPages;
+  captureState.loginAttempted = false;
+  captureState.loginStatus = "skipped";
+  captureState.loginError = "";
 }
 
 function trimCollection(collection, max = 250) {
@@ -168,6 +175,101 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.crawlCompleted = false;
     captureState.crawlVisited = [];
     captureState.crawlQueue = [];
+    captureState.loginAttempted = false;
+    captureState.loginStatus = "skipped";
+    captureState.loginError = "";
+  }
+}
+
+async function fillFirstVisible(page, selectors, value) {
+  for (const selector of selectors) {
+    const locator = page.locator(selector).first();
+    const count = await locator.count().catch(() => 0);
+    if (count === 0) {
+      continue;
+    }
+
+    const visible = await locator.isVisible().catch(() => false);
+    const editable = await locator.isEditable().catch(() => false);
+    if (!visible || !editable) {
+      continue;
+    }
+
+    await locator.fill(value);
+    return locator;
+  }
+
+  return null;
+}
+
+async function attemptPageLogin(page, credentials = {}) {
+  const username = String(credentials.username || "").trim();
+  const password = String(credentials.password || "");
+
+  if (!username || !password) {
+    captureState.loginAttempted = false;
+    captureState.loginStatus = "skipped";
+    captureState.loginError = "";
+    return;
+  }
+
+  captureState.loginAttempted = true;
+  captureState.loginStatus = "attempting";
+  captureState.loginError = "";
+
+  try {
+    const usernameInput = await fillFirstVisible(
+      page,
+      [
+        'input[type="email"]',
+        'input[name*="email" i]',
+        'input[id*="email" i]',
+        'input[name*="user" i]',
+        'input[id*="user" i]',
+        'input[name*="login" i]',
+        'input[id*="login" i]',
+        'input[name*="id" i]',
+        'input[id*="id" i]',
+        'input[type="text"]',
+        "input:not([type])"
+      ],
+      username
+    );
+    const passwordInput = await fillFirstVisible(page, ['input[type="password"]'], password);
+
+    if (!usernameInput || !passwordInput) {
+      captureState.loginStatus = "not-found";
+      captureState.loginError = "Login inputs were not found on the first page.";
+      return;
+    }
+
+    const submitButton = page
+      .locator(
+        'button[type="submit"], input[type="submit"], button:has-text("로그인"), button:has-text("Login"), button:has-text("Sign in"), button:has-text("로그인하기")'
+      )
+      .first();
+    const hasSubmitButton = (await submitButton.count().catch(() => 0)) > 0;
+
+    if (hasSubmitButton && (await submitButton.isVisible().catch(() => false))) {
+      await Promise.allSettled([
+        page.waitForLoadState("domcontentloaded", { timeout: 10000 }),
+        submitButton.click()
+      ]);
+    } else {
+      await Promise.allSettled([
+        page.waitForLoadState("domcontentloaded", { timeout: 10000 }),
+        passwordInput.press("Enter")
+      ]);
+    }
+
+    if (captureLoginWaitMs > 0) {
+      await sleep(captureLoginWaitMs);
+    }
+
+    captureState.loginStatus = "submitted";
+  } catch (error) {
+    captureState.loginStatus = "failed";
+    captureState.loginError = error instanceof Error ? error.message : "Login automation failed.";
   }
 }
 
@@ -546,7 +648,7 @@ function attachCaptureListeners(page, targetHost) {
   });
 }
 
-async function launchCaptureSession(domain, excludePatterns = []) {
+async function launchCaptureSession(domain, excludePatterns = [], credentials = {}) {
   const targetUrl = normalizeUrl(domain);
   const parsedTargetUrl = new URL(targetUrl);
   const targetHost = parsedTargetUrl.host;
@@ -596,13 +698,16 @@ async function launchCaptureSession(domain, excludePatterns = []) {
   await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
   scheduleCaptureIdleStop();
 
+  await attemptPageLogin(page, credentials);
+
   if (captureReadyDelayMs > 0) {
     await sleep(captureReadyDelayMs);
   }
 
   if (captureCrawlEnabled) {
     const sessionId = captureState.sessionId;
-    void crawlCapturePages(page, targetUrl, targetHost, sessionId).catch((error) => {
+    const crawlStartUrl = normalizeCrawlUrl(page.url(), targetUrl, targetHost) || targetUrl;
+    void crawlCapturePages(page, crawlStartUrl, targetHost, sessionId).catch((error) => {
       captureState.errors.push({
         id: targetUrl + "-" + Date.now(),
         timestamp: new Date().toISOString(),
@@ -735,6 +840,9 @@ app.get("/api/capture/status", (_request, response) => {
     crawlVisited: captureState.crawlVisited,
     crawlQueueLength: captureState.crawlQueue.length,
     crawlMaxPages: captureState.crawlMaxPages,
+    loginAttempted: captureState.loginAttempted,
+    loginStatus: captureState.loginStatus,
+    loginError: captureState.loginError,
     exchanges: captureState.exchanges,
     errors: captureState.errors
   });
@@ -748,12 +856,13 @@ app.post("/api/capture/start", async (request, response) => {
     return;
   }
 
-  const { domain, excludePatterns } = request.body ?? {};
+  const { domain, excludePatterns, credentials } = request.body ?? {};
 
   try {
     await launchCaptureSession(
       domain,
-      Array.isArray(excludePatterns) ? excludePatterns.filter(Boolean) : []
+      Array.isArray(excludePatterns) ? excludePatterns.filter(Boolean) : [],
+      credentials && typeof credentials === "object" ? credentials : {}
     );
     response.json({
       ok: true,
@@ -762,7 +871,10 @@ app.post("/api/capture/start", async (request, response) => {
       startedAt: captureState.startedAt,
       excludePatterns: captureState.excludePatterns,
       crawlEnabled: captureCrawlEnabled,
-      crawlMaxPages: captureState.crawlMaxPages
+      crawlMaxPages: captureState.crawlMaxPages,
+      loginAttempted: captureState.loginAttempted,
+      loginStatus: captureState.loginStatus,
+      loginError: captureState.loginError
     });
   } catch (error) {
     response.status(400).json({
@@ -790,7 +902,8 @@ app.get("/api/health", (_request, response) => {
     captureIdleAutoStopMs,
     captureCrawlEnabled,
     captureCrawlMaxPages,
-    captureCrawlPageDelayMs
+    captureCrawlPageDelayMs,
+    captureLoginWaitMs
   });
 });
 

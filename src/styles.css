@@ -624,6 +624,7 @@ input {
   align-items: center;
   gap: 10px;
   width: 100%;
+  min-width: 0;
 }
 
 .field-label span {
@@ -662,6 +663,14 @@ input {
 .capture-form input::placeholder {
   color: #8f98ab;
   font-weight: 700;
+}
+
+.credential-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+  width: 100%;
+  min-width: 0;
 }
 
 .field-hint {
@@ -2177,6 +2186,10 @@ button:disabled {
 
   .field-label span {
     flex-basis: 68px;
+  }
+
+  .credential-fields {
+    grid-template-columns: 1fr;
   }
 
   .exchange-card {

@@ -132,6 +132,7 @@ CAPTURE_IDLE_AUTO_STOP_MS=10000
 CAPTURE_CRAWL_ENABLED=true
 CAPTURE_CRAWL_MAX_PAGES=8
 CAPTURE_CRAWL_PAGE_DELAY_MS=1500
+CAPTURE_LOGIN_WAIT_MS=3000
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 ```
@@ -154,6 +155,8 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
   네트워크 활동이 없을 때 자동 중지하기까지 기다리는 시간입니다. 기본값은 `10000`입니다.
 - `CAPTURE_CRAWL_ENABLED`, `CAPTURE_CRAWL_MAX_PAGES`, `CAPTURE_CRAWL_PAGE_DELAY_MS`
   캡처 시작 후 같은 도메인의 링크를 자동 순회할지, 최대 몇 페이지까지 볼지, 페이지 사이에 얼마나 기다릴지 설정합니다.
+- `CAPTURE_LOGIN_WAIT_MS`
+  ID/PW 자동 입력 후 로그인 처리를 기다리는 시간입니다. 기본값은 `3000`입니다.
 
 ## 실행 방법
 
@@ -210,15 +213,18 @@ npm run dev
 
 1. `Capture` 화면에서 분석 대상 URL을 입력합니다.
 2. 필요하면 추가 제외 패턴을 입력합니다.
-3. `캡처 시작`을 누르면 서버가 Playwright 브라우저를 열고 대상 URL로 이동합니다.
-4. 첫 페이지 로드 후 3초 대기한 뒤 같은 도메인의 링크를 최대 `CAPTURE_CRAWL_MAX_PAGES`개까지 자동 순회합니다.
-5. 크롤링이 완료되면 캡처가 자동 중지되고, 사이드바 진행 상태가 `complete`로 바뀝니다.
-6. 요청/응답 목록을 보면서 finding과 Diff를 확인합니다.
+3. 로그인 필요한 사이트라면 `ID`, `PW`를 입력합니다.
+4. `캡처 시작`을 누르면 서버가 Playwright 브라우저를 열고 대상 URL로 이동합니다.
+5. ID/PW가 있으면 첫 화면의 로그인 폼을 자동 감지해 입력/제출합니다.
+6. 첫 페이지 로드 후 3초 대기한 뒤 같은 도메인의 링크를 최대 `CAPTURE_CRAWL_MAX_PAGES`개까지 자동 순회합니다.
+7. 크롤링이 완료되면 캡처가 자동 중지되고, 사이드바 진행 상태가 `complete`로 바뀝니다.
+8. 요청/응답 목록을 보면서 finding과 Diff를 확인합니다.
 
 참고:
 
 - 이미지 요청은 기본적으로 항상 제외됩니다.
 - `Excluded` 입력칸은 추가 제외 규칙만 받습니다.
+- `ID`, `PW`는 로그인 자동 입력에만 사용하며 앱 저장소에는 저장하지 않습니다.
 - `Capture` 사이드바에는 캡처된 요청 수, 전체 요청 수, 크롤링 페이지 수, 오류 수가 표시됩니다.
 - 수동으로 중지하고 싶으면 `캡처 중지`를 누르면 됩니다.
 - `Capture` 화면에서는 요청별 보안 finding 요약만 보여주고, 상세 내용은 `Findings` 메뉴에서 확인합니다.
