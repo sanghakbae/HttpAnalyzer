@@ -70,6 +70,7 @@ const captureState = {
   sessionApplied: false,
   sessionStatus: "skipped",
   sessionError: "",
+  inspectionSaved: false,
   exchanges: [],
   errors: []
 };
@@ -110,13 +111,22 @@ async function rememberInspectionRun(payload, reason = "local") {
   };
   const duplicateIndex = rows.findIndex(
     (item) =>
-      (item.capture_session_id || "") === (savedRun.capture_session_id || "") &&
-      (item.target_url || "") === (savedRun.target_url || "") &&
-      (item.ended_at || "") === (savedRun.ended_at || "")
+      (savedRun.capture_session_id &&
+        (item.capture_session_id || "") === (savedRun.capture_session_id || "")) ||
+      (!savedRun.capture_session_id &&
+        (item.target_url || "") === (savedRun.target_url || "") &&
+        (item.ended_at || "") === (savedRun.ended_at || ""))
   );
 
   if (duplicateIndex >= 0) {
-    rows.splice(duplicateIndex, 1);
+    rows.splice(duplicateIndex, 1, {
+      ...rows[duplicateIndex],
+      ...savedRun,
+      id: rows[duplicateIndex].id || savedRun.id,
+      created_at: rows[duplicateIndex].created_at || savedRun.created_at
+    });
+    await writeLocalInspectionRuns(rows.slice(0, historyMaxRows));
+    return rows[duplicateIndex];
   }
 
   rows.unshift(savedRun);
@@ -141,12 +151,17 @@ function resetCaptureCollections() {
   captureState.sessionApplied = false;
   captureState.sessionStatus = "skipped";
   captureState.sessionError = "";
+  captureState.inspectionSaved = false;
 }
 
 function trimCollection(collection, max = 250) {
   if (collection.length > max) {
     collection.splice(0, collection.length - max);
   }
+}
+
+function isAbortedErrorText(value) {
+  return /net::ERR_ABORTED/i.test(String(value || ""));
 }
 
 function rememberCaptureEvent(payload, reason = "memory") {
@@ -201,6 +216,68 @@ function normalizeUrl(input) {
   return `https://${input}`;
 }
 
+function buildInspectionRunFromCaptureState(reason = "manual") {
+  const endedAt = captureState.stoppedAt || new Date().toISOString();
+  const visibleExchanges = captureState.exchanges.filter((exchange) => {
+    const requestUrl = exchange.request?.url || "";
+    const responseUrl = exchange.response?.url || "";
+    return !captureState.excludePatterns.some(
+      (pattern) =>
+        pattern &&
+        ((requestUrl && requestUrl.includes(pattern)) ||
+          (responseUrl && responseUrl.includes(pattern)))
+    );
+  });
+  const visibleErrors = captureState.errors.filter((item) => !isAbortedErrorText(item?.errorText));
+
+  return {
+    capture_session_id: captureState.sessionId,
+    target_url: captureState.targetUrl,
+    started_at: captureState.startedAt,
+    ended_at: endedAt,
+    total_exchanges: visibleExchanges.length,
+    total_errors: visibleErrors.length,
+    total_findings: 0,
+    critical_findings: 0,
+    high_findings: 0,
+    security_only: false,
+    mask_sensitive: true,
+    excluded_patterns: captureState.excludePatterns,
+    owasp_summary: [],
+    endpoint_summary: [],
+    report_snapshot: {
+      exportedAt: endedAt,
+      inspector: "backend",
+      domain: captureState.targetUrl,
+      excluded: captureState.excludePatterns,
+      securityOnly: false,
+      maskSensitive: true,
+      stopReason: reason,
+      totalErrors: visibleErrors.length,
+      totalFindings: 0,
+      criticalFindings: 0,
+      highFindings: 0,
+      summary: {
+        visiblePairs: visibleExchanges.length,
+        totalFindings: 0
+      },
+      exchanges: visibleExchanges,
+      errors: visibleErrors
+    }
+  };
+}
+
+async function persistCaptureInspectionRun(reason = "manual") {
+  if (captureState.inspectionSaved || !captureState.sessionId || !captureState.targetUrl) {
+    return;
+  }
+
+  const saved = await saveInspectionRun(buildInspectionRunFromCaptureState(reason));
+  if (saved.saved) {
+    captureState.inspectionSaved = true;
+  }
+}
+
 async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } = {}) {
   clearCaptureIdleTimer();
 
@@ -224,6 +301,13 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
   captureState.crawlActive = false;
   captureState.crawlCompleted = reason === "crawl-complete";
 
+  await persistCaptureInspectionRun(reason).catch((error) => {
+    console.warn(
+      "Failed to persist capture inspection run:",
+      error instanceof Error ? error.message : String(error)
+    );
+  });
+
   if (clearMetadata) {
     captureState.startedAt = null;
     captureState.sessionId = null;
@@ -242,6 +326,7 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.sessionApplied = false;
     captureState.sessionStatus = "skipped";
     captureState.sessionError = "";
+    captureState.inspectionSaved = false;
   }
 }
 
@@ -645,6 +730,46 @@ async function saveInspectionRun(payload) {
   if (!supabase) {
     const localRun = await rememberInspectionRun(payload, "Supabase credentials are not configured.");
     return { saved: true, local: true, id: localRun.id, reason: localRun.storage_reason };
+  }
+
+  if (isUuid(payload.capture_session_id)) {
+    const { data: existingRows, error: lookupError } = await supabase
+      .from("capture_inspection_runs")
+      .select("id, report_snapshot")
+      .eq("capture_session_id", payload.capture_session_id)
+      .order("ended_at", { ascending: false })
+      .limit(1);
+
+    if (!lookupError && Array.isArray(existingRows) && existingRows.length > 0) {
+      const existing = existingRows[0];
+      const existingSnapshot =
+        existing.report_snapshot && typeof existing.report_snapshot === "object"
+          ? existing.report_snapshot
+          : {};
+      const nextSnapshot =
+        payload.report_snapshot && typeof payload.report_snapshot === "object"
+          ? payload.report_snapshot
+          : {};
+      const { error: updateError } = await supabase
+        .from("capture_inspection_runs")
+        .update({
+          ...payload,
+          report_snapshot: {
+            ...existingSnapshot,
+            ...nextSnapshot,
+            aiSummary: nextSnapshot.aiSummary || existingSnapshot.aiSummary,
+            aiSummaryMeta: nextSnapshot.aiSummaryMeta || existingSnapshot.aiSummaryMeta
+          }
+        })
+        .eq("id", existing.id);
+
+      if (!updateError) {
+        return { saved: true, updated: true, id: existing.id };
+      }
+
+      const localRun = await rememberInspectionRun(payload, updateError.message);
+      return { saved: true, local: true, id: localRun.id, reason: updateError.message };
+    }
   }
 
   const { error } = await supabase.from("capture_inspection_runs").insert(payload);
@@ -1356,6 +1481,10 @@ app.post("/api/inspection-runs", async (request, response) => {
     if (!saved.saved) {
       response.status(400).json(saved);
       return;
+    }
+
+    if (payload.capture_session_id && payload.capture_session_id === captureState.sessionId) {
+      captureState.inspectionSaved = true;
     }
 
     response.json(saved);
