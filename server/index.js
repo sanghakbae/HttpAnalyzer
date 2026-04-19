@@ -18,6 +18,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const proxyRulesPath = path.resolve(__dirname, "../proxy/rules.json");
+const localDataDir = path.resolve(__dirname, "../.local-data");
+const localInspectionRunsPath = path.resolve(localDataDir, "inspection-runs.json");
 const execFileAsync = promisify(execFile);
 
 app.use(cors());
@@ -74,6 +76,53 @@ const captureState = {
 
 const attachedCapturePages = new WeakSet();
 const memoryRecentCaptureEvents = [];
+
+async function readJsonFile(filePath, fallback) {
+  try {
+    const raw = await fs.readFile(filePath, "utf-8");
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+async function writeJsonFile(filePath, payload) {
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8");
+}
+
+async function readLocalInspectionRuns() {
+  const rows = await readJsonFile(localInspectionRunsPath, []);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function writeLocalInspectionRuns(rows) {
+  await writeJsonFile(localInspectionRunsPath, rows);
+}
+
+async function rememberInspectionRun(payload, reason = "local") {
+  const rows = await readLocalInspectionRuns();
+  const savedRun = {
+    id: payload.id || `local-inspection-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    created_at: payload.created_at || payload.ended_at || new Date().toISOString(),
+    storage_reason: reason,
+    ...payload
+  };
+  const duplicateIndex = rows.findIndex(
+    (item) =>
+      (item.capture_session_id || "") === (savedRun.capture_session_id || "") &&
+      (item.target_url || "") === (savedRun.target_url || "") &&
+      (item.ended_at || "") === (savedRun.ended_at || "")
+  );
+
+  if (duplicateIndex >= 0) {
+    rows.splice(duplicateIndex, 1);
+  }
+
+  rows.unshift(savedRun);
+  await writeLocalInspectionRuns(rows.slice(0, historyMaxRows));
+  return savedRun;
+}
 
 function resetCaptureCollections() {
   captureState.exchanges = [];
@@ -594,13 +643,15 @@ async function saveCaptureRecord(payload) {
 
 async function saveInspectionRun(payload) {
   if (!supabase) {
-    return { saved: false, reason: "Supabase credentials are not configured." };
+    const localRun = await rememberInspectionRun(payload, "Supabase credentials are not configured.");
+    return { saved: true, local: true, id: localRun.id, reason: localRun.storage_reason };
   }
 
   const { error } = await supabase.from("capture_inspection_runs").insert(payload);
 
   if (error) {
-    return { saved: false, reason: error.message };
+    const localRun = await rememberInspectionRun(payload, error.message);
+    return { saved: true, local: true, id: localRun.id, reason: error.message };
   }
 
   return { saved: true };
@@ -614,7 +665,38 @@ function isUuid(value) {
 
 async function saveInspectionRunSummary(payload) {
   if (!supabase) {
-    return { saved: false, reason: "Supabase credentials are not configured." };
+    const localRuns = await readLocalInspectionRuns();
+    const runIndex = localRuns.findIndex((run) =>
+      isUuid(payload.capture_session_id)
+        ? run.capture_session_id === payload.capture_session_id
+        : run.target_url === payload.target_url
+    );
+
+    if (runIndex < 0) {
+      return { saved: false, reason: "No matching local inspection run was found." };
+    }
+
+    const summaryMeta =
+      payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
+    const reportSnapshot =
+      localRuns[runIndex].report_snapshot && typeof localRuns[runIndex].report_snapshot === "object"
+        ? localRuns[runIndex].report_snapshot
+        : {};
+
+    localRuns[runIndex] = {
+      ...localRuns[runIndex],
+      report_snapshot: {
+        ...reportSnapshot,
+        aiSummary: payload.summary,
+        aiSummaryMeta: {
+          ...summaryMeta,
+          syncedAt: new Date().toISOString()
+        }
+      }
+    };
+    await writeLocalInspectionRuns(localRuns);
+
+    return { saved: true, local: true, id: localRuns[runIndex].id };
   }
 
   if (!payload.summary) {
@@ -638,7 +720,38 @@ async function saveInspectionRunSummary(payload) {
   const { data, error } = await query;
 
   if (error) {
-    return { saved: false, reason: error.message };
+    const localRuns = await readLocalInspectionRuns();
+    const runIndex = localRuns.findIndex((run) =>
+      isUuid(payload.capture_session_id)
+        ? run.capture_session_id === payload.capture_session_id
+        : run.target_url === payload.target_url
+    );
+
+    if (runIndex < 0) {
+      return { saved: false, reason: error.message };
+    }
+
+    const summaryMeta =
+      payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
+    const reportSnapshot =
+      localRuns[runIndex].report_snapshot && typeof localRuns[runIndex].report_snapshot === "object"
+        ? localRuns[runIndex].report_snapshot
+        : {};
+
+    localRuns[runIndex] = {
+      ...localRuns[runIndex],
+      report_snapshot: {
+        ...reportSnapshot,
+        aiSummary: payload.summary,
+        aiSummaryMeta: {
+          ...summaryMeta,
+          syncedAt: new Date().toISOString()
+        }
+      }
+    };
+    await writeLocalInspectionRuns(localRuns);
+
+    return { saved: true, local: true, id: localRuns[runIndex].id, reason: error.message };
   }
 
   const run = Array.isArray(data) ? data[0] : null;
@@ -742,7 +855,40 @@ async function loadAllSupabaseRows(table, orderColumn) {
 }
 
 async function loadRecentInspectionRuns() {
-  return loadAllSupabaseRows("capture_inspection_runs", "created_at");
+  const localRuns = await readLocalInspectionRuns();
+
+  if (!supabase) {
+    return localRuns;
+  }
+
+  let remoteRuns = [];
+  try {
+    remoteRuns = await loadAllSupabaseRows("capture_inspection_runs", "created_at");
+  } catch (error) {
+    console.warn(
+      "Inspection runs remote load failed; using local history:",
+      error instanceof Error ? error.message : String(error)
+    );
+  }
+
+  const merged = [...localRuns, ...remoteRuns];
+  const seen = new Set();
+
+  return merged.filter((run) => {
+    const key = [
+      run.capture_session_id || "",
+      run.target_url || "",
+      run.ended_at || "",
+      run.id || ""
+    ].join("::");
+
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
 }
 
 function attachCaptureListeners(page, targetHost) {
