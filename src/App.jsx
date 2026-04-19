@@ -2550,7 +2550,7 @@ export default function App() {
   const [captureMermaidModal, setCaptureMermaidModal] = useState("");
   const [focusedFindingExchangeId, setFocusedFindingExchangeId] = useState("");
   const storedOpenAiSettings = getStoredJson(OPENAI_SETTINGS_KEY, {});
-  const [openAiKey, setOpenAiKey] = useState("");
+  const [openAiKey, setOpenAiKey] = useState(storedOpenAiSettings?.apiKey || "");
   const [openAiModel, setOpenAiModel] = useState(storedOpenAiSettings?.model || "gpt-4.1-mini");
   const [openAiPrompt, setOpenAiPrompt] = useState(
     storedOpenAiSettings?.prompt || DEFAULT_OPENAI_SUMMARY_PROMPT
@@ -3138,11 +3138,12 @@ export default function App() {
     setStoredValue(
       OPENAI_SETTINGS_KEY,
       JSON.stringify({
+        apiKey: openAiKey,
         model: openAiModel,
         prompt: openAiPrompt
       })
     );
-  }, [openAiModel, openAiPrompt]);
+  }, [openAiKey, openAiModel, openAiPrompt]);
 
   useEffect(() => {
     setStoredValue("http-analyzer-sidebar-collapsed", String(sidebarCollapsed));
@@ -5433,7 +5434,7 @@ window.addEventListener("load", () => {
                 <div className="tool-panel section-panel">
                   <strong>OpenAI Summary Settings</strong>
                   <p className="tool-copy">
-                    캡처가 자동 완료되거나 `캡처 중지`로 종료되면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 브라우저 상태에만 보관하고 서버에 저장하지 않습니다.
+                    캡처가 자동 완료되거나 `캡처 중지`로 종료되면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 이 브라우저의 localStorage에만 보관하고 서버/DB에는 저장하지 않습니다.
                   </p>
                   <div className="tool-grid-2">
                     <label className="field-label field-card">
