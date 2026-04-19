@@ -716,7 +716,8 @@ function getHostFromUrl(input) {
 
 function getRunDomainKey(run) {
   const targetUrl = run?.target_url || run?.report_snapshot?.domain || "";
-  return getHostFromUrl(targetUrl) || targetUrl || "unknown";
+  const host = getHostFromUrl(targetUrl);
+  return (host || targetUrl || "unknown").replace(/^www\./i, "");
 }
 
 function getRunTimeValue(run) {
@@ -724,37 +725,68 @@ function getRunTimeValue(run) {
   return Number.isNaN(time) ? 0 : time;
 }
 
+function getRunFindingStats(run) {
+  const exchanges = Array.isArray(run?.report_snapshot?.exchanges)
+    ? run.report_snapshot.exchanges
+    : [];
+
+  if (exchanges.length === 0) {
+    return {
+      total: Number(run?.total_findings || 0),
+      critical: Number(run?.critical_findings || 0),
+      high: Number(run?.high_findings || 0)
+    };
+  }
+
+  const findings = exchanges.flatMap((exchange) =>
+    mergeSecurityFindings(exchange.securityFindings, analyzeSecurityFindings(exchange), exchange)
+  );
+
+  return {
+    total: findings.length,
+    critical: findings.filter((finding) => finding.severity === "critical").length,
+    high: findings.filter((finding) => finding.severity === "high").length
+  };
+}
+
 function buildDomainHistoryRuns(runs) {
   const grouped = new Map();
 
   for (const run of runs) {
     const domainKey = getRunDomainKey(run);
+    const findingStats = getRunFindingStats(run);
     const current = grouped.get(domainKey);
     const currentLatestTime = current ? getRunTimeValue(current) : 0;
     const nextTime = getRunTimeValue(run);
+    const runWithComputedStats = {
+      ...run,
+      total_findings: findingStats.total,
+      critical_findings: findingStats.critical,
+      high_findings: findingStats.high
+    };
 
     if (!current || nextTime >= currentLatestTime) {
       grouped.set(domainKey, {
-        ...run,
+        ...runWithComputedStats,
         domainKey,
         scanCount: (current?.scanCount || 0) + 1,
         aggregate_total_exchanges:
           Number(current?.aggregate_total_exchanges || 0) + Number(run.total_exchanges || 0),
         aggregate_total_findings:
-          Number(current?.aggregate_total_findings || 0) + Number(run.total_findings || 0),
+          Number(current?.aggregate_total_findings || 0) + findingStats.total,
         aggregate_critical_findings:
-          Number(current?.aggregate_critical_findings || 0) + Number(run.critical_findings || 0),
+          Number(current?.aggregate_critical_findings || 0) + findingStats.critical,
         aggregate_high_findings:
-          Number(current?.aggregate_high_findings || 0) + Number(run.high_findings || 0)
+          Number(current?.aggregate_high_findings || 0) + findingStats.high
       });
       continue;
     }
 
     current.scanCount += 1;
     current.aggregate_total_exchanges += Number(run.total_exchanges || 0);
-    current.aggregate_total_findings += Number(run.total_findings || 0);
-    current.aggregate_critical_findings += Number(run.critical_findings || 0);
-    current.aggregate_high_findings += Number(run.high_findings || 0);
+    current.aggregate_total_findings += findingStats.total;
+    current.aggregate_critical_findings += findingStats.critical;
+    current.aggregate_high_findings += findingStats.high;
   }
 
   return [...grouped.values()].sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a));
