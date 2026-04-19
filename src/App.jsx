@@ -671,6 +671,52 @@ function getHostFromUrl(input) {
   }
 }
 
+function getRunDomainKey(run) {
+  const targetUrl = run?.target_url || run?.report_snapshot?.domain || "";
+  return getHostFromUrl(targetUrl) || targetUrl || "unknown";
+}
+
+function getRunTimeValue(run) {
+  const time = new Date(run?.ended_at || run?.created_at || run?.started_at || 0).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function buildDomainHistoryRuns(runs) {
+  const grouped = new Map();
+
+  for (const run of runs) {
+    const domainKey = getRunDomainKey(run);
+    const current = grouped.get(domainKey);
+    const currentLatestTime = current ? getRunTimeValue(current) : 0;
+    const nextTime = getRunTimeValue(run);
+
+    if (!current || nextTime >= currentLatestTime) {
+      grouped.set(domainKey, {
+        ...run,
+        domainKey,
+        scanCount: (current?.scanCount || 0) + 1,
+        aggregate_total_exchanges:
+          Number(current?.aggregate_total_exchanges || 0) + Number(run.total_exchanges || 0),
+        aggregate_total_findings:
+          Number(current?.aggregate_total_findings || 0) + Number(run.total_findings || 0),
+        aggregate_critical_findings:
+          Number(current?.aggregate_critical_findings || 0) + Number(run.critical_findings || 0),
+        aggregate_high_findings:
+          Number(current?.aggregate_high_findings || 0) + Number(run.high_findings || 0)
+      });
+      continue;
+    }
+
+    current.scanCount += 1;
+    current.aggregate_total_exchanges += Number(run.total_exchanges || 0);
+    current.aggregate_total_findings += Number(run.total_findings || 0);
+    current.aggregate_critical_findings += Number(run.critical_findings || 0);
+    current.aggregate_high_findings += Number(run.high_findings || 0);
+  }
+
+  return [...grouped.values()].sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a));
+}
+
 function buildSuppressionRule(scope, finding, exchange) {
   const endpoint = normalizeEndpoint(exchange.request?.url || exchange.response?.url);
   const host = getHostFromUrl(exchange.request?.url || exchange.response?.url);
@@ -2687,6 +2733,10 @@ export default function App() {
         )
     ],
     [localInspectionRuns, recentInspectionRuns]
+  );
+  const domainHistoryRuns = useMemo(
+    () => buildDomainHistoryRuns(mergedInspectionRuns),
+    [mergedInspectionRuns]
   );
   const mergedCaptureEvents = useMemo(
     () =>
@@ -4771,8 +4821,8 @@ window.addEventListener("load", () => {
       key: "recent",
       icon: "recent",
       label: "Recent Data",
-      description: "이전 점검 전체 이력",
-      count: mergedInspectionRuns.length
+      description: "스캔 도메인 목록",
+      count: domainHistoryRuns.length
     },
     {
       key: "sqlmap",
@@ -5324,25 +5374,26 @@ window.addEventListener("load", () => {
                 </div>
                 <div className="recent-capture-panel section-panel">
                   <div className="recent-section-header">
-                    <strong>Saved Inspection History</strong>
-                    <span>이전 점검 이력 전체를 불러와 현재 분석 화면과 모든 메뉴에 복원합니다.</span>
+                    <strong>Recent Capture Events</strong>
+                    <span>스캔한 도메인 목록만 표시합니다. 불러오기는 해당 도메인의 최신 완료 스캔을 복원합니다.</span>
                   </div>
                   <div className="inspection-run-table">
-                    {mergedInspectionRuns.length === 0 ? (
+                    {domainHistoryRuns.length === 0 ? (
                       <span className="empty-copy">
-                        {recentLoading ? "이전 이력을 불러오는 중..." : "저장된 이전 점검 이력이 없습니다."}
+                        {recentLoading ? "스캔한 도메인을 불러오는 중..." : "저장된 스캔 도메인이 없습니다."}
                       </span>
                     ) : (
-                      mergedInspectionRuns.map((item) => {
+                      domainHistoryRuns.map((item) => {
                         const summaryRecord = getAiSummaryRecordForRun(item);
 
                         return (
-                          <div key={item.id} className="inspection-run-item">
+                          <div key={item.domainKey || item.id} className="inspection-run-item">
                             <div className="inspection-run-row">
                               <div className="inspection-run-main">
-                                <strong>{item.target_url || "-"}</strong>
+                                <strong>{item.domainKey || item.target_url || "-"}</strong>
                                 <div className="inspection-run-meta">
-                                  <span>{formatDateTime(item.started_at)} ~ {formatDateTime(item.ended_at)}</span>
+                                  <span>최근 스캔 {formatDateTime(item.ended_at || item.created_at)}</span>
+                                  <span>스캔 {item.scanCount || 1}회</span>
                                   <span>
                                     {item.historySource === "local"
                                       ? item.pending_sync
@@ -5354,13 +5405,13 @@ window.addEventListener("load", () => {
                                 </div>
                               </div>
                               <div className="inspection-run-metrics">
-                                <span>요청 {item.total_exchanges}건</span>
-                                <span>에러 {item.total_errors}건</span>
-                                <span>Finding {item.total_findings}건</span>
+                                <span>최근 요청 {item.total_exchanges}건</span>
+                                <span>전체 요청 {item.aggregate_total_exchanges ?? item.total_exchanges}건</span>
+                                <span>Finding {item.aggregate_total_findings ?? item.total_findings}건</span>
                               </div>
                               <div className="inspection-run-risk">
-                                <span className="risk-chip risk-critical">Critical {item.critical_findings}</span>
-                                <span className="risk-chip risk-high">High {item.high_findings}</span>
+                                <span className="risk-chip risk-critical">Critical {item.aggregate_critical_findings ?? item.critical_findings}</span>
+                                <span className="risk-chip risk-high">High {item.aggregate_high_findings ?? item.high_findings}</span>
                               </div>
                               <div className="inspection-run-actions">
                                 <button type="button" onClick={() => loadInspectionRunIntoWorkspace(item)}>
