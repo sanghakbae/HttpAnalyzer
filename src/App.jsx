@@ -2030,6 +2030,8 @@ function MermaidModal({ code, onClose, onCopy }) {
 
 export default function App() {
   const appShellRef = useRef(null);
+  const activeRef = useRef(false);
+  const autoStoppedSessionRef = useRef("");
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -2292,11 +2294,36 @@ export default function App() {
         const response = await fetch(`${API_BASE_URL}/api/capture/status`);
         if (!response.ok) return;
         const data = await response.json();
-        setActive(Boolean(data.active));
+        const nextActive = Boolean(data.active);
+        const wasActive = activeRef.current;
+        const autoStopped =
+          wasActive &&
+          !nextActive &&
+          data.stopReason === "idle" &&
+          data.sessionId &&
+          autoStoppedSessionRef.current !== data.sessionId;
+
+        activeRef.current = nextActive;
+        setActive(nextActive);
         setCaptureSessionId(data.sessionId || "");
         setCaptureStartedAt(data.startedAt || "");
         setExchanges(data.exchanges || []);
         setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
+
+        if (autoStopped) {
+          autoStoppedSessionRef.current = data.sessionId;
+          setStatusMessage("네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.");
+
+          const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`).catch(() => null);
+          if (recentResponse?.ok) {
+            const recentData = await recentResponse.json();
+            setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
+            setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
+            setRecentInspectionRuns(
+              Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
+            );
+          }
+        }
 
         const persistedDomain = getStoredValue("http-analyzer-domain");
         const persistedExcludeInput = getStoredValue("http-analyzer-exclude-patterns");
@@ -2543,6 +2570,8 @@ export default function App() {
       setStatusMessage("");
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
+      activeRef.current = true;
+      autoStoppedSessionRef.current = "";
       setExchanges([]);
       setErrors([]);
     } catch (error) {
@@ -2650,6 +2679,7 @@ export default function App() {
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
       setStatusMessage("");
       setActive(false);
+      activeRef.current = false;
       setCaptureSessionId("");
       setCaptureStartedAt("");
 

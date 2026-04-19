@@ -19,6 +19,8 @@ services:
         value: "0"
       - key: CAPTURE_READY_DELAY_MS
         value: "3000"
+      - key: CAPTURE_IDLE_AUTO_STOP_MS
+        value: "10000"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

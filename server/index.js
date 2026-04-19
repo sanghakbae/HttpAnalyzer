@@ -26,6 +26,7 @@ const disableCapture = process.env.DISABLE_CAPTURE === "true";
 const playwrightHeadless =
   process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
 const captureReadyDelayMs = Number(process.env.CAPTURE_READY_DELAY_MS || 3000);
+const captureIdleAutoStopMs = Number(process.env.CAPTURE_IDLE_AUTO_STOP_MS || 10000);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -43,6 +44,10 @@ const captureState = {
   sessionId: null,
   targetUrl: null,
   excludePatterns: [],
+  lastActivityAt: null,
+  stoppedAt: null,
+  stopReason: null,
+  idleTimer: null,
   exchanges: [],
   errors: []
 };
@@ -50,6 +55,9 @@ const captureState = {
 function resetCaptureCollections() {
   captureState.exchanges = [];
   captureState.errors = [];
+  captureState.lastActivityAt = null;
+  captureState.stoppedAt = null;
+  captureState.stopReason = null;
 }
 
 function trimCollection(collection, max = 250) {
@@ -64,6 +72,30 @@ function sleep(ms) {
   });
 }
 
+function clearCaptureIdleTimer() {
+  if (captureState.idleTimer) {
+    clearTimeout(captureState.idleTimer);
+    captureState.idleTimer = null;
+  }
+}
+
+function scheduleCaptureIdleStop() {
+  clearCaptureIdleTimer();
+
+  if (!captureState.page || captureIdleAutoStopMs <= 0) {
+    return;
+  }
+
+  captureState.idleTimer = setTimeout(() => {
+    void closeCaptureBrowser({ clearMetadata: false, reason: "idle" });
+  }, captureIdleAutoStopMs);
+}
+
+function touchCaptureActivity() {
+  captureState.lastActivityAt = new Date().toISOString();
+  scheduleCaptureIdleStop();
+}
+
 function normalizeUrl(input) {
   if (!input) {
     throw new Error("domain is required");
@@ -76,7 +108,9 @@ function normalizeUrl(input) {
   return `https://${input}`;
 }
 
-async function closeCaptureBrowser() {
+async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } = {}) {
+  clearCaptureIdleTimer();
+
   if (captureState.page) {
     await captureState.page.close().catch(() => {});
   }
@@ -92,10 +126,18 @@ async function closeCaptureBrowser() {
   captureState.browser = null;
   captureState.context = null;
   captureState.page = null;
-  captureState.startedAt = null;
-  captureState.sessionId = null;
-  captureState.targetUrl = null;
-  captureState.excludePatterns = [];
+  captureState.stoppedAt = new Date().toISOString();
+  captureState.stopReason = reason;
+
+  if (clearMetadata) {
+    captureState.startedAt = null;
+    captureState.sessionId = null;
+    captureState.targetUrl = null;
+    captureState.excludePatterns = [];
+    captureState.lastActivityAt = null;
+    captureState.stoppedAt = null;
+    captureState.stopReason = null;
+  }
 }
 
 function sanitizeHeaders(headers) {
@@ -231,6 +273,8 @@ function attachCaptureListeners(page, targetHost) {
       return;
     }
 
+    touchCaptureActivity();
+
     const id = request.url() + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
     const entry = {
       id,
@@ -260,6 +304,8 @@ function attachCaptureListeners(page, targetHost) {
     if (shouldExclude(url)) {
       return;
     }
+
+    touchCaptureActivity();
 
     let bodyPreview = "";
     try {
@@ -330,6 +376,8 @@ function attachCaptureListeners(page, targetHost) {
       return;
     }
 
+    touchCaptureActivity();
+
     const failedEntry = {
       id: url + "-" + Date.now(),
       timestamp: new Date().toISOString(),
@@ -395,17 +443,21 @@ async function launchCaptureSession(domain, excludePatterns = []) {
     attachCaptureListeners(newPage, targetHost);
   });
 
-  const page = await context.newPage();
-  attachCaptureListeners(page, targetHost);
-  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-
   captureState.browser = browser;
   captureState.context = context;
-  captureState.page = page;
   captureState.startedAt = new Date().toISOString();
   captureState.sessionId = randomUUID();
   captureState.targetUrl = targetUrl;
   captureState.excludePatterns = excludePatterns;
+  captureState.lastActivityAt = captureState.startedAt;
+  captureState.stoppedAt = null;
+  captureState.stopReason = null;
+
+  const page = await context.newPage();
+  captureState.page = page;
+  attachCaptureListeners(page, targetHost);
+  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+  scheduleCaptureIdleStop();
 
   if (captureReadyDelayMs > 0) {
     await sleep(captureReadyDelayMs);
@@ -519,6 +571,10 @@ app.get("/api/capture/status", (_request, response) => {
     sessionId: captureState.sessionId,
     targetUrl: captureState.targetUrl,
     excludePatterns: captureState.excludePatterns,
+    lastActivityAt: captureState.lastActivityAt,
+    stoppedAt: captureState.stoppedAt,
+    stopReason: captureState.stopReason,
+    idleAutoStopMs: captureIdleAutoStopMs,
     exchanges: captureState.exchanges,
     errors: captureState.errors
   });
@@ -559,7 +615,7 @@ app.post("/api/capture/stop", async (_request, response) => {
     return;
   }
 
-  await closeCaptureBrowser();
+  await closeCaptureBrowser({ reason: "manual" });
   response.json({ ok: true });
 });
 
@@ -568,7 +624,8 @@ app.get("/api/health", (_request, response) => {
     ok: true,
     service: "http-analyzer-api",
     supabaseConfigured: Boolean(supabase),
-    captureDisabled: disableCapture
+    captureDisabled: disableCapture,
+    captureIdleAutoStopMs
   });
 });
 
