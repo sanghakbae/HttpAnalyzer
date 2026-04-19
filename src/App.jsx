@@ -2046,6 +2046,7 @@ export default function App() {
   );
   const [loginId, setLoginId] = useState("");
   const [loginPassword, setLoginPassword] = useState("");
+  const [sessionValue, setSessionValue] = useState("");
   const [securityOnly, setSecurityOnly] = useState(
     () => getStoredValue("http-analyzer-security-only") === "true"
   );
@@ -2087,7 +2088,10 @@ export default function App() {
     crawlMaxPages: 0,
     loginAttempted: false,
     loginStatus: "skipped",
-    loginError: ""
+    loginError: "",
+    sessionApplied: false,
+    sessionStatus: "skipped",
+    sessionError: ""
   });
   const [exchanges, setExchanges] = useState([]);
   const [errors, setErrors] = useState([]);
@@ -2329,7 +2333,10 @@ export default function App() {
           crawlMaxPages: Number(data.crawlMaxPages || 0),
           loginAttempted: Boolean(data.loginAttempted),
           loginStatus: data.loginStatus || "skipped",
-          loginError: data.loginError || ""
+          loginError: data.loginError || "",
+          sessionApplied: Boolean(data.sessionApplied),
+          sessionStatus: data.sessionStatus || "skipped",
+          sessionError: data.sessionError || ""
         });
         setExchanges(data.exchanges || []);
         setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
@@ -2585,7 +2592,7 @@ export default function App() {
         : [...FIXED_EXCLUDE_PATTERNS];
 
       const credentials =
-        loginId.trim() && loginPassword
+        !sessionValue.trim() && loginId.trim() && loginPassword
           ? {
               username: loginId.trim(),
               password: loginPassword
@@ -2595,7 +2602,12 @@ export default function App() {
       const response = await fetch(`${API_BASE_URL}/api/capture/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ domain, excludePatterns, credentials })
+        body: JSON.stringify({
+          domain,
+          excludePatterns,
+          credentials,
+          sessionValue: sessionValue.trim()
+        })
       });
 
       const { data, rawText } = await readJsonSafely(response);
@@ -2617,7 +2629,10 @@ export default function App() {
         crawlMaxPages: Number(result.crawlMaxPages || 0),
         loginAttempted: Boolean(result.loginAttempted),
         loginStatus: result.loginStatus || "skipped",
-        loginError: result.loginError || ""
+        loginError: result.loginError || "",
+        sessionApplied: Boolean(result.sessionApplied),
+        sessionStatus: result.sessionStatus || "skipped",
+        sessionError: result.sessionError || ""
       });
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
@@ -3365,6 +3380,8 @@ window.addEventListener("load", () => {
         : "idle";
   const loginStateLabel = captureMeta.loginAttempted
     ? captureMeta.loginStatus || "attempting"
+    : captureMeta.sessionApplied
+      ? `session ${captureMeta.sessionStatus || "applied"}`
     : "no login";
   const captureProgressPercent = active
     ? captureMeta.crawlMaxPages > 0
@@ -3595,25 +3612,27 @@ window.addEventListener("load", () => {
             {activeSection === "capture" ? (
               <div className="capture-control-panel">
                 <form className="capture-form filter-bar" onSubmit={startCapture}>
-                  <label className="field-label field-card">
-                    <span>URL:</span>
-                    <input
-                      type="text"
-                      placeholder="도메인 입력"
-                      value={domain}
-                      onChange={(event) => setDomain(event.target.value)}
-                    />
-                  </label>
-                  <label className="field-label field-card">
-                    <span>Excluded:</span>
-                    <input
-                      type="text"
-                      placeholder="추가 제외 패턴 입력"
-                      value={excludeInput}
-                      onChange={(event) => setExcludeInput(event.target.value)}
-                    />
-                  </label>
-                  <div className="credential-fields">
+                  <div className="capture-filter-row">
+                    <label className="field-label field-card">
+                      <span>URL:</span>
+                      <input
+                        type="text"
+                        placeholder="도메인 입력"
+                        value={domain}
+                        onChange={(event) => setDomain(event.target.value)}
+                      />
+                    </label>
+                    <label className="field-label field-card">
+                      <span>Excluded:</span>
+                      <input
+                        type="text"
+                        placeholder="추가 제외 패턴 입력"
+                        value={excludeInput}
+                        onChange={(event) => setExcludeInput(event.target.value)}
+                      />
+                    </label>
+                  </div>
+                  <div className="auth-fields">
                     <label className="field-label field-card">
                       <span>ID:</span>
                       <input
@@ -3634,9 +3653,19 @@ window.addEventListener("load", () => {
                         onChange={(event) => setLoginPassword(event.target.value)}
                       />
                     </label>
+                    <label className="field-label field-card session-field">
+                      <span>Session:</span>
+                      <input
+                        type="password"
+                        autoComplete="off"
+                        placeholder="SESSIONID=... 또는 Cookie 문자열"
+                        value={sessionValue}
+                        onChange={(event) => setSessionValue(event.target.value)}
+                      />
+                    </label>
                   </div>
                   <p className="field-hint">
-                    이미지 요청은 항상 제외됩니다. ID/PW는 로그인 자동 입력에만 사용하며 저장하지 않습니다.
+                    이미지 요청은 항상 제외됩니다. ID/PW 또는 Session 중 하나를 입력하면 인증된 상태로 스캔합니다.
                   </p>
                   <div className="action-row action-card">
                     <button type="submit" disabled={submitting || active}>

@@ -665,12 +665,21 @@ input {
   font-weight: 700;
 }
 
-.credential-fields {
+.capture-filter-row,
+.auth-fields {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px;
   width: 100%;
   min-width: 0;
+}
+
+.auth-fields {
+  grid-template-columns: minmax(0, 0.82fr) minmax(0, 0.82fr) minmax(0, 1.36fr);
+}
+
+.session-field span {
+  flex-basis: 118px;
 }
 
 .field-hint {
@@ -2188,7 +2197,8 @@ button:disabled {
     flex-basis: 68px;
   }
 
-  .credential-fields {
+  .capture-filter-row,
+  .auth-fields {
     grid-template-columns: 1fr;
   }
 

@@ -60,6 +60,9 @@ const captureState = {
   loginAttempted: false,
   loginStatus: "skipped",
   loginError: "",
+  sessionApplied: false,
+  sessionStatus: "skipped",
+  sessionError: "",
   exchanges: [],
   errors: []
 };
@@ -80,6 +83,9 @@ function resetCaptureCollections() {
   captureState.loginAttempted = false;
   captureState.loginStatus = "skipped";
   captureState.loginError = "";
+  captureState.sessionApplied = false;
+  captureState.sessionStatus = "skipped";
+  captureState.sessionError = "";
 }
 
 function trimCollection(collection, max = 250) {
@@ -178,6 +184,79 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.loginAttempted = false;
     captureState.loginStatus = "skipped";
     captureState.loginError = "";
+    captureState.sessionApplied = false;
+    captureState.sessionStatus = "skipped";
+    captureState.sessionError = "";
+  }
+}
+
+function parseSessionCookies(sessionValue, targetUrl) {
+  const value = String(sessionValue || "")
+    .replace(/^cookie:\s*/i, "")
+    .trim();
+
+  if (!value) {
+    return [];
+  }
+
+  const cookieSource = value.includes("=") ? value : `session=${value}`;
+  const targetOrigin = new URL(targetUrl).origin;
+
+  return cookieSource
+    .split(";")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .map((item) => {
+      const separatorIndex = item.indexOf("=");
+      if (separatorIndex <= 0) {
+        return null;
+      }
+
+      const name = item.slice(0, separatorIndex).trim();
+      const cookieValue = item.slice(separatorIndex + 1).trim();
+      if (!name || !cookieValue) {
+        return null;
+      }
+
+      return {
+        url: targetOrigin,
+        name,
+        value: cookieValue,
+        sameSite: "Lax"
+      };
+    })
+    .filter(Boolean);
+}
+
+async function applySessionValue(context, targetUrl, sessionValue) {
+  const value = String(sessionValue || "").trim();
+
+  if (!value) {
+    captureState.sessionApplied = false;
+    captureState.sessionStatus = "skipped";
+    captureState.sessionError = "";
+    return false;
+  }
+
+  captureState.sessionApplied = true;
+  captureState.sessionStatus = "applying";
+  captureState.sessionError = "";
+
+  try {
+    const cookies = parseSessionCookies(value, targetUrl);
+    if (cookies.length === 0) {
+      captureState.sessionStatus = "invalid";
+      captureState.sessionError = "Session value could not be parsed as a cookie.";
+      return false;
+    }
+
+    await context.addCookies(cookies);
+    captureState.sessionStatus = "applied";
+    return true;
+  } catch (error) {
+    captureState.sessionStatus = "failed";
+    captureState.sessionError = error instanceof Error ? error.message : "Failed to apply session value.";
+    return false;
   }
 }
 
@@ -648,7 +727,7 @@ function attachCaptureListeners(page, targetHost) {
   });
 }
 
-async function launchCaptureSession(domain, excludePatterns = [], credentials = {}) {
+async function launchCaptureSession(domain, excludePatterns = [], authOptions = {}) {
   const targetUrl = normalizeUrl(domain);
   const parsedTargetUrl = new URL(targetUrl);
   const targetHost = parsedTargetUrl.host;
@@ -682,6 +761,8 @@ async function launchCaptureSession(domain, excludePatterns = [], credentials = 
     attachCaptureListeners(newPage, targetHost);
   });
 
+  const sessionWasApplied = await applySessionValue(context, targetUrl, authOptions.sessionValue);
+
   captureState.browser = browser;
   captureState.context = context;
   captureState.startedAt = new Date().toISOString();
@@ -698,7 +779,9 @@ async function launchCaptureSession(domain, excludePatterns = [], credentials = 
   await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
   scheduleCaptureIdleStop();
 
-  await attemptPageLogin(page, credentials);
+  if (!sessionWasApplied) {
+    await attemptPageLogin(page, authOptions.credentials);
+  }
 
   if (captureReadyDelayMs > 0) {
     await sleep(captureReadyDelayMs);
@@ -843,6 +926,9 @@ app.get("/api/capture/status", (_request, response) => {
     loginAttempted: captureState.loginAttempted,
     loginStatus: captureState.loginStatus,
     loginError: captureState.loginError,
+    sessionApplied: captureState.sessionApplied,
+    sessionStatus: captureState.sessionStatus,
+    sessionError: captureState.sessionError,
     exchanges: captureState.exchanges,
     errors: captureState.errors
   });
@@ -856,13 +942,16 @@ app.post("/api/capture/start", async (request, response) => {
     return;
   }
 
-  const { domain, excludePatterns, credentials } = request.body ?? {};
+  const { domain, excludePatterns, credentials, sessionValue } = request.body ?? {};
 
   try {
     await launchCaptureSession(
       domain,
       Array.isArray(excludePatterns) ? excludePatterns.filter(Boolean) : [],
-      credentials && typeof credentials === "object" ? credentials : {}
+      {
+        credentials: credentials && typeof credentials === "object" ? credentials : {},
+        sessionValue: typeof sessionValue === "string" ? sessionValue : ""
+      }
     );
     response.json({
       ok: true,
@@ -874,7 +963,10 @@ app.post("/api/capture/start", async (request, response) => {
       crawlMaxPages: captureState.crawlMaxPages,
       loginAttempted: captureState.loginAttempted,
       loginStatus: captureState.loginStatus,
-      loginError: captureState.loginError
+      loginError: captureState.loginError,
+      sessionApplied: captureState.sessionApplied,
+      sessionStatus: captureState.sessionStatus,
+      sessionError: captureState.sessionError
     });
   } catch (error) {
     response.status(400).json({
