@@ -1672,7 +1672,7 @@ button:disabled {
   flex-direction: column;
   gap: 14px;
   border-radius: 18px;
-  background: linear-gradient(180deg, #f8fbff, #eef4ff);
+  background: linear-gradient(180deg, #1d2b3f, #0b1c30);
 }
 
 .mermaid-modal-header {
@@ -1682,7 +1682,14 @@ button:disabled {
   gap: 12px;
 }
 
-.mermaid-modal-header strong,
+.mermaid-modal-header strong {
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 900;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
 .mermaid-panel > strong {
   color: #0b1c30;
   font-size: 13px;
@@ -1695,8 +1702,10 @@ button:disabled {
   display: grid;
   grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
   gap: 14px;
-  min-height: 520px;
-  overflow: hidden;
+  align-items: stretch;
+  min-height: clamp(280px, 48vh, 620px);
+  max-height: calc(100vh - 150px);
+  overflow: auto;
 }
 
 .mermaid-panel {
@@ -1712,6 +1721,8 @@ button:disabled {
 }
 
 .mermaid-modal-code {
+  min-height: min(48vh, 520px);
+  max-height: calc(100vh - 230px);
   margin: 0;
   padding: 14px 16px;
   border-radius: 10px;
@@ -1728,6 +1739,7 @@ button:disabled {
 .mermaid-preview-box {
   display: grid;
   place-items: center;
+  min-height: min(48vh, 520px);
   min-width: 0;
   overflow: auto;
   padding: 18px;
