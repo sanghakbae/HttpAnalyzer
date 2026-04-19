@@ -2895,12 +2895,22 @@ button,
   max-width: 100%;
   overflow: hidden;
   padding: 0;
-  border: 0;
+  border: 1px solid rgba(100, 116, 139, 0.16);
   border-radius: 14px;
-  background: #ffffff !important;
+  background: #edf1f5 !important;
   background-image: none !important;
-  box-shadow: inset 0 0 0 1px rgba(11, 28, 48, 0.055);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.52),
+    0 10px 22px rgba(15, 23, 42, 0.06);
   color: #0b1c30;
+}
+
+.exchange-card .exchange-column:first-child {
+  background: #e9edf4 !important;
+}
+
+.exchange-card .exchange-column:last-child {
+  background: #eef1f4 !important;
 }
 
 .interactive-column {
@@ -2920,8 +2930,8 @@ button,
 
 .entry-title-row {
   min-width: 0;
-  min-height: 64px;
-  padding: 18px 22px;
+  min-height: 0;
+  padding: 12px 14px;
   border-bottom: 1px solid rgba(198, 198, 205, 0.22);
 }
 
@@ -2962,9 +2972,9 @@ button,
 
 .code-block {
   width: auto;
-  max-width: calc(100% - 44px);
+  max-width: calc(100% - 28px);
   min-width: 0;
-  margin: 18px 22px 22px;
+  margin: 12px 14px 14px;
   border-radius: 8px;
   background: #213145;
   color: #eaf1ff;
@@ -3436,6 +3446,13 @@ button,
   text-transform: uppercase;
 }
 
+.candidate-list > strong {
+  margin-bottom: 2px;
+  font-size: 13px;
+  line-height: 1.1;
+  letter-spacing: 0.14em;
+}
+
 .tool-copy {
   margin: -8px 0 0;
   color: #57657a;
@@ -3490,9 +3507,9 @@ button,
 
 .candidate-list {
   display: grid;
-  gap: 6px;
-  padding: 14px;
-  border-radius: 14px;
+  gap: 4px;
+  padding: 8px;
+  border-radius: 10px;
   background: #ffffff;
   box-shadow: inset 0 0 0 1px rgba(11, 28, 48, 0.045);
 }
@@ -3509,15 +3526,15 @@ button,
 
 .candidate-row {
   display: grid;
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 10px;
+  grid-template-columns: 48px minmax(0, 1fr);
+  gap: 7px;
   align-items: center;
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 46px;
-  padding: 8px 10px;
-  border-radius: 10px;
+  min-height: 30px;
+  padding: 4px 7px;
+  border-radius: 7px;
   background: #f8f9ff !important;
   color: #0b1c30 !important;
   text-align: left;
@@ -3533,18 +3550,18 @@ button,
 
 .candidate-method {
   width: fit-content;
-  padding: 4px 8px;
+  padding: 2px 6px;
   border-radius: 999px;
   background: #dbe1ff;
   color: #003ea8;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 900;
 }
 
 .candidate-main {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 8px;
   min-width: 0;
 }
 
@@ -3554,7 +3571,7 @@ button,
   min-width: 120px;
   color: #0b1c30;
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 12px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3565,7 +3582,7 @@ button,
   min-width: 180px;
   color: #57657a;
   font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
   text-overflow: ellipsis;
   white-space: nowrap;

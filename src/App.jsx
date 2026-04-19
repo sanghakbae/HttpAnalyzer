@@ -2453,6 +2453,7 @@ export default function App() {
   const appShellRef = useRef(null);
   const activeRef = useRef(false);
   const autoStoppedSessionRef = useRef("");
+  const savedInspectionSessionRef = useRef("");
   const summarizedSessionRef = useRef("");
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
@@ -2935,6 +2936,24 @@ export default function App() {
                 : "네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.";
           setStatusMessage(autoStopMessage);
 
+          if (["crawl-complete", "idle", "crawl-error"].includes(data.stopReason)) {
+            const endedAt = data.stoppedAt || new Date().toISOString();
+            const captureInput = {
+              targetUrl: data.targetUrl,
+              sessionId: data.sessionId,
+              exchanges: data.exchanges || [],
+              errors: data.errors || []
+            };
+            const snapshot = buildInspectionSnapshotFromCapture(captureInput, {
+              startedAt: data.startedAt,
+              endedAt
+            });
+            await persistInspectionRunFromSnapshot(snapshot, captureInput, data.sessionId, {
+              startedAt: data.startedAt,
+              endedAt
+            });
+          }
+
           const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`).catch(() => null);
           if (recentResponse?.ok) {
             const recentData = await recentResponse.json();
@@ -2949,6 +2968,7 @@ export default function App() {
             await requestCaptureCompletionSummary(
               {
                 targetUrl: data.targetUrl,
+                sessionId: data.sessionId,
                 exchanges: data.exchanges || [],
                 errors: data.errors || []
               },
@@ -3366,6 +3386,160 @@ export default function App() {
     });
   }
 
+  function buildInspectionSnapshotFromCapture(captureInput = {}, meta = {}) {
+    const snapshotTargetUrl = captureInput.targetUrl || domain || getStoredValue("http-analyzer-domain") || "";
+    const snapshotTargetHost = getHostFromUrl(snapshotTargetUrl);
+    const rawExchanges = Array.isArray(captureInput.exchanges) ? captureInput.exchanges : [];
+    const rawErrors = Array.isArray(captureInput.errors) ? captureInput.errors : [];
+    const snapshotExcluded = getCombinedExcludePatterns(excludeInput);
+    const snapshotExchanges = rawExchanges
+      .filter((exchange) => isSameTargetHostExchange(exchange, snapshotTargetHost))
+      .map((exchange) => ({
+        ...exchange,
+        endpointKey: normalizeEndpoint(exchange.request?.url || exchange.response?.url),
+        securityFindings: analyzeSecurityFindings(exchange).filter(
+          (finding) =>
+            !suppressionRules.some((rule) => matchesSuppressionRule(rule, finding, exchange))
+        )
+      }))
+      .filter((exchange) => {
+        if (securityOnly && exchange.securityFindings.length === 0) {
+          return false;
+        }
+
+        if (isImageLikeExchange(exchange)) {
+          return false;
+        }
+
+        const requestUrl = exchange.request?.url || "";
+        const responseUrl = exchange.response?.url || "";
+        return !snapshotExcluded.some(
+          (pattern) =>
+            pattern &&
+            ((requestUrl && requestUrl.includes(pattern)) ||
+              (responseUrl && responseUrl.includes(pattern)))
+        );
+      });
+    const snapshotFindings = snapshotExchanges.flatMap((exchange) => exchange.securityFindings);
+    const snapshotCritical = snapshotFindings.filter((finding) => finding.severity === "critical");
+    const snapshotHigh = snapshotFindings.filter((finding) => finding.severity === "high");
+    const snapshotOwaspSummary = summarizeFindingsByOwasp(snapshotFindings);
+    const snapshotEndpointSummary = summarizeEndpoints(snapshotExchanges);
+    const snapshotErrors = rawErrors.filter((item) => !isAbortedErrorText(item?.errorText));
+
+    return {
+      exportedAt: meta.endedAt || new Date().toISOString(),
+      inspector: authUser?.email || "-",
+      domain: snapshotTargetUrl,
+      excluded: snapshotExcluded,
+      securityOnly,
+      maskSensitive,
+      totalErrors: snapshotErrors.length,
+      totalFindings: snapshotFindings.length,
+      criticalFindings: snapshotCritical.length,
+      highFindings: snapshotHigh.length,
+      conclusion: buildInspectionConclusion({
+        totalFindings: snapshotFindings.length,
+        criticalFindings: snapshotCritical.length,
+        highFindings: snapshotHigh.length,
+        totalErrors: snapshotErrors.length
+      }),
+      owaspSummary: snapshotOwaspSummary,
+      endpointSummary: snapshotEndpointSummary,
+      summary: {
+        visiblePairs: snapshotExchanges.length,
+        totalFindings: snapshotFindings.length
+      },
+      exchanges: snapshotExchanges.map((exchange) => ({
+        ...exchange,
+        securityFindings: (exchange.securityFindings || []).map((finding) => ({
+          ...finding,
+          evidence: maybeMask(finding.evidence, maskSensitive)
+        })),
+        request: exchange.request
+          ? {
+              ...exchange.request,
+              url: maybeMask(exchange.request.url || "", maskSensitive),
+              headers: exchange.request.headers,
+              postData: maybeMask(exchange.request.postData || "", maskSensitive)
+            }
+          : null,
+        response: exchange.response
+          ? {
+              ...exchange.response,
+              url: maybeMask(exchange.response.url || "", maskSensitive),
+              headers: exchange.response.headers,
+              bodyPreview: maybeMask(exchange.response.bodyPreview || "", maskSensitive)
+            }
+          : null
+      }))
+    };
+  }
+
+  async function persistInspectionRunFromSnapshot(snapshot, captureInput = {}, sessionId = "", meta = {}) {
+    const runSessionId = sessionId || captureInput.sessionId || "";
+    if (runSessionId && savedInspectionSessionRef.current === runSessionId) {
+      return null;
+    }
+
+    if (runSessionId) {
+      savedInspectionSessionRef.current = runSessionId;
+    }
+
+    const endedAt = meta.endedAt || snapshot.exportedAt || new Date().toISOString();
+    const targetUrl = snapshot.domain || captureInput.targetUrl || domain || "unknown";
+    const localRun = {
+      id: `local-run-${Date.now()}`,
+      created_at: endedAt,
+      pending_sync: true,
+      capture_session_id: runSessionId || null,
+      target_url: targetUrl,
+      started_at: meta.startedAt || captureStartedAt || null,
+      ended_at: endedAt,
+      total_exchanges: snapshot.summary?.visiblePairs ?? snapshot.exchanges?.length ?? 0,
+      total_errors: snapshot.totalErrors ?? 0,
+      total_findings: snapshot.totalFindings ?? 0,
+      critical_findings: snapshot.criticalFindings ?? 0,
+      high_findings: snapshot.highFindings ?? 0,
+      security_only: Boolean(snapshot.securityOnly),
+      mask_sensitive: Boolean(snapshot.maskSensitive),
+      excluded_patterns: Array.isArray(snapshot.excluded) ? snapshot.excluded : [],
+      owasp_summary: snapshot.owaspSummary || [],
+      endpoint_summary: (snapshot.endpointSummary || []).slice(0, 10),
+      report_snapshot: snapshot
+    };
+
+    setLocalInspectionRuns((current) => [localRun, ...current].slice(0, 20));
+
+    const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        capture_session_id: localRun.capture_session_id,
+        target_url: localRun.target_url,
+        started_at: localRun.started_at,
+        ended_at: localRun.ended_at,
+        total_exchanges: localRun.total_exchanges,
+        total_errors: localRun.total_errors,
+        total_findings: localRun.total_findings,
+        critical_findings: localRun.critical_findings,
+        high_findings: localRun.high_findings,
+        security_only: localRun.security_only,
+        mask_sensitive: localRun.mask_sensitive,
+        excluded_patterns: localRun.excluded_patterns,
+        owasp_summary: localRun.owasp_summary,
+        endpoint_summary: localRun.endpoint_summary,
+        report_snapshot: snapshot
+      })
+    }).catch(() => null);
+
+    if (inspectionResponse?.ok) {
+      setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
+    }
+
+    return localRun;
+  }
+
   async function runSqlmapScan(event) {
     event.preventDefault();
     setSqlmapLoading(true);
@@ -3615,6 +3789,7 @@ export default function App() {
       });
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
+      savedInspectionSessionRef.current = "";
       summarizedSessionRef.current = "";
       setExchanges([]);
       setErrors([]);
@@ -4369,6 +4544,7 @@ window.addEventListener("load", () => {
   }
 
   function openInspectionRun(run) {
+    loadInspectionRunIntoWorkspace(run, { showStatus: false });
     const summaryRecord = getAiSummaryRecordForRun(run);
     setInspectionModalRun(
       summaryRecord
@@ -4383,6 +4559,91 @@ window.addEventListener("load", () => {
           }
         : run
     );
+  }
+
+  function buildExchangeFromCaptureEvent(event) {
+    const requestUrl = event.request_url || event.target_url || "";
+    return {
+      id: `recent-event-${event.id || requestUrl || Date.now()}`,
+      timestamp: event.request_timestamp || event.created_at || "",
+      endpointKey: normalizeEndpoint(requestUrl),
+      request: requestUrl
+        ? {
+            method: event.request_method || "GET",
+            url: requestUrl,
+            resourceType: event.request_resource_type || "request",
+            headers: event.request_headers || {},
+            postData: event.request_body || ""
+          }
+        : null,
+      response:
+        event.response_status || event.response_url || event.response_body_preview
+          ? {
+              timestamp: event.response_timestamp || event.created_at || "",
+              url: event.response_url || requestUrl,
+              status: event.response_status || null,
+              statusText: event.response_status_text || "",
+              headers: event.response_headers || {},
+              bodyPreview: event.response_body_preview || ""
+            }
+          : null
+    };
+  }
+
+  function getInspectionRunExchanges(run) {
+    const snapshot = run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {};
+
+    if (Array.isArray(snapshot.exchanges) && snapshot.exchanges.length > 0) {
+      return snapshot.exchanges.map((exchange, index) => ({
+        ...exchange,
+        id: exchange.id || `snapshot-exchange-${run.id || run.capture_session_id || index}-${index}`,
+        endpointKey: exchange.endpointKey || exchange.endpoint || normalizeEndpoint(exchange.request?.url || exchange.response?.url)
+      }));
+    }
+
+    return mergedCaptureEvents
+      .filter((event) =>
+        run.capture_session_id
+          ? event.capture_session_id === run.capture_session_id
+          : event.target_url === run.target_url
+      )
+      .map(buildExchangeFromCaptureEvent);
+  }
+
+  function loadInspectionRunIntoWorkspace(run, options = {}) {
+    const snapshot = getInspectionReportSnapshot(run);
+    const nextDomain = snapshot.domain || run.target_url || "";
+    const nextExcluded = Array.isArray(snapshot.excluded)
+      ? snapshot.excluded
+      : Array.isArray(run.excluded_patterns)
+        ? run.excluded_patterns
+        : [];
+    const userExcluded = nextExcluded.filter((pattern) => !FIXED_EXCLUDE_PATTERNS.includes(pattern));
+    const nextExchanges = getInspectionRunExchanges(run);
+    const summaryRecord = getAiSummaryRecordForRun(run);
+
+    setDomain(nextDomain);
+    setExcludeInput(userExcluded.join(", "));
+    setSecurityOnly(Boolean(snapshot.securityOnly ?? run.security_only));
+    setMaskSensitive(Boolean(snapshot.maskSensitive ?? run.mask_sensitive ?? true));
+    setExchanges(nextExchanges);
+    setErrors([]);
+    setFocusedFindingExchangeId("");
+    setActive(false);
+    activeRef.current = false;
+    setCaptureSessionId(run.capture_session_id || "");
+    setCaptureStartedAt(run.started_at || "");
+
+    if (summaryRecord?.summary) {
+      setAiSummary(summaryRecord.summary);
+      setAiSummaryError("");
+    }
+
+    if (options.showStatus !== false) {
+      setStatusMessage(
+        `${nextDomain || "선택한 점검"} 결과를 현재 분석 화면에 불러왔습니다. Overview, Findings, SQLMap, API Test에 반영됩니다.`
+      );
+    }
   }
 
   function getInspectionReportSnapshot(run) {
@@ -4484,8 +4745,8 @@ window.addEventListener("load", () => {
       key: "recent",
       icon: "recent",
       label: "Recent Data",
-      description: "최근 저장된 캡처 기록",
-      count: mergedCaptureEvents.length + mergedInspectionRuns.length
+      description: "도메인별 스캔 이력",
+      count: mergedInspectionRuns.length
     },
     {
       key: "sqlmap",
@@ -5037,8 +5298,8 @@ window.addEventListener("load", () => {
                 </div>
                 <div className="recent-capture-panel section-panel">
                   <div className="recent-section-header">
-                    <strong>Recent Inspection Runs</strong>
-                    <span>최근 점검 이력을 한 행 단위로 정리했습니다.</span>
+                    <strong>Scanned Domains</strong>
+                    <span>도메인별 스캔 이력을 불러오면 모든 메뉴에 같은 결과가 반영됩니다.</span>
                   </div>
                   <div className="inspection-run-table">
                     {mergedInspectionRuns.length === 0 ? (
@@ -5076,6 +5337,9 @@ window.addEventListener("load", () => {
                                 <span className="risk-chip risk-high">High {item.high_findings}</span>
                               </div>
                               <div className="inspection-run-actions">
+                                <button type="button" onClick={() => loadInspectionRunIntoWorkspace(item)}>
+                                  불러오기
+                                </button>
                                 <button type="button" onClick={() => openInspectionRun(item)}>
                                   상세 보기
                                 </button>
@@ -5104,35 +5368,6 @@ window.addEventListener("load", () => {
                           </div>
                         );
                       })
-                    )}
-                  </div>
-                  <strong>Recent Capture Events</strong>
-                  <div className="recent-list">
-                    {mergedCaptureEvents.length === 0 ? (
-                      <span className="empty-copy">
-                        {recentLoading ? "불러오는 중..." : "최근 캡처 이벤트가 없습니다."}
-                      </span>
-                    ) : (
-                      mergedCaptureEvents.map((item) => (
-                        <div key={item.id} className="recent-card">
-                          <strong>
-                            {item.request_method || "?"}{" "}
-                            {item.request_url || item.target_url || "-"}
-                          </strong>
-                          <span>
-                            출처:{" "}
-                            {item.historySource === "local"
-                              ? item.pending_sync
-                                ? "로컬(대기)"
-                                : "로컬"
-                              : "DB"}
-                          </span>
-                          <span>{formatDateTime(item.created_at)}</span>
-                          <span>세션: {item.capture_session_id || "-"}</span>
-                          <span>상태: {item.response_status || item.error_text || "-"}</span>
-                          <span>타입: {item.request_resource_type || "-"}</span>
-                        </div>
-                      ))
                     )}
                   </div>
                 </div>
@@ -5411,7 +5646,7 @@ window.addEventListener("load", () => {
                           className="candidate-row"
                           onClick={() => loadApiTestFromExchange(exchange)}
                         >
-                          <span>{exchange.request?.method || "GET"}</span>
+                          <span className="candidate-method">{exchange.request?.method || "GET"}</span>
                           <div className="candidate-main">
                             <strong>{exchange.request?.url || exchange.response?.url || "-"}</strong>
                             <small>
