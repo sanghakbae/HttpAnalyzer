@@ -652,7 +652,8 @@ function getSeverityWeight(severity) {
 }
 
 function buildFindingSignature(finding, exchange) {
-  return `${normalizeEndpoint(exchange.request?.url || exchange.response?.url)}::${finding.key}`;
+  const sourceRun = exchange.sourceRunId || "";
+  return `${sourceRun}::${normalizeEndpoint(exchange.request?.url || exchange.response?.url)}::${finding.key}`;
 }
 
 function normalizeStoredFinding(finding) {
@@ -749,6 +750,29 @@ function getRunFindingStats(run) {
   };
 }
 
+function buildRunAggregateExchanges(run, domainKey, runIndex) {
+  const exchanges = Array.isArray(run?.report_snapshot?.exchanges) ? run.report_snapshot.exchanges : [];
+
+  return exchanges.map((exchange, exchangeIndex) => {
+    const exchangeWithSource = {
+      ...exchange,
+      id: `domain-history-${domainKey || getRunDomainKey(run)}-${runIndex}-${exchange.id || exchangeIndex}`,
+      endpointKey: exchange.endpointKey || exchange.endpoint || normalizeEndpoint(exchange.request?.url || exchange.response?.url),
+      sourceRunId: run.id || run.capture_session_id || "",
+      sourceRunEndedAt: run.ended_at || run.created_at || ""
+    };
+
+    return {
+      ...exchangeWithSource,
+      securityFindings: mergeSecurityFindings(
+        exchange.securityFindings,
+        analyzeSecurityFindings(exchangeWithSource),
+        exchangeWithSource
+      )
+    };
+  });
+}
+
 function buildDomainHistoryRuns(runs) {
   const grouped = new Map();
 
@@ -766,9 +790,18 @@ function buildDomainHistoryRuns(runs) {
     };
 
     if (!current || nextTime >= currentLatestTime) {
+      const runsForDomain = current ? [...(current.runs || []), runWithComputedStats] : [runWithComputedStats];
+      const aggregateExchanges = runsForDomain.flatMap((historyRun, runIndex) =>
+        buildRunAggregateExchanges(historyRun, domainKey, runIndex)
+      );
       grouped.set(domainKey, {
         ...runWithComputedStats,
+        report_snapshot: {
+          ...(runWithComputedStats.report_snapshot || {}),
+          exchanges: aggregateExchanges
+        },
         domainKey,
+        runs: runsForDomain.sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a)),
         scanCount: (current?.scanCount || 0) + 1,
         aggregate_total_exchanges:
           Number(current?.aggregate_total_exchanges || 0) + Number(run.total_exchanges || 0),
@@ -782,6 +815,15 @@ function buildDomainHistoryRuns(runs) {
       continue;
     }
 
+    current.runs = [...(current.runs || []), runWithComputedStats].sort(
+      (a, b) => getRunTimeValue(b) - getRunTimeValue(a)
+    );
+    current.report_snapshot = {
+      ...(current.report_snapshot || {}),
+      exchanges: current.runs.flatMap((historyRun, runIndex) =>
+        buildRunAggregateExchanges(historyRun, domainKey, runIndex)
+      )
+    };
     current.scanCount += 1;
     current.aggregate_total_exchanges += Number(run.total_exchanges || 0);
     current.aggregate_total_findings += findingStats.total;
@@ -3077,8 +3119,10 @@ export default function App() {
           sessionStatus: data.sessionStatus || "skipped",
           sessionError: data.sessionError || ""
         });
-        setExchanges(data.exchanges || []);
-        setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
+        if (nextActive || wasActive) {
+          setExchanges(data.exchanges || []);
+          setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
+        }
 
         if (autoStopped) {
           autoStoppedSessionRef.current = data.sessionId;
@@ -4743,6 +4787,41 @@ window.addEventListener("load", () => {
   }
 
   function getInspectionRunExchanges(run) {
+    if (run.domainKey && Array.isArray(run.report_snapshot?.exchanges) && run.report_snapshot.exchanges.length > 0) {
+      return run.report_snapshot.exchanges;
+    }
+
+    const domainRuns =
+      Array.isArray(run.runs) && run.runs.length > 0
+        ? run.runs
+        : run.domainKey
+          ? mergedInspectionRuns
+              .filter((historyRun) => getRunDomainKey(historyRun) === run.domainKey)
+              .sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a))
+          : [];
+
+    if (domainRuns.length > 0) {
+      return domainRuns.flatMap((historyRun, runIndex) =>
+        getInspectionRunExchanges(historyRun).map((exchange, exchangeIndex) => {
+          const exchangeWithSource = {
+            ...exchange,
+            id: `domain-history-${run.domainKey || historyRun.target_url || "run"}-${runIndex}-${exchange.id || exchangeIndex}`,
+            sourceRunId: historyRun.id || historyRun.capture_session_id || "",
+            sourceRunEndedAt: historyRun.ended_at || historyRun.created_at || ""
+          };
+
+          return {
+            ...exchangeWithSource,
+            securityFindings: mergeSecurityFindings(
+              exchange.securityFindings,
+              analyzeSecurityFindings(exchangeWithSource),
+              exchangeWithSource
+            )
+          };
+        })
+      );
+    }
+
     const snapshot = run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {};
 
     if (Array.isArray(snapshot.exchanges) && snapshot.exchanges.length > 0) {
@@ -4793,7 +4872,7 @@ window.addEventListener("load", () => {
 
     if (options.showStatus !== false) {
       setStatusMessage(
-        `${nextDomain || "선택한 점검"} 결과를 현재 분석 화면에 불러왔습니다. Overview, Findings, SQLMap, API Test에 반영됩니다.`
+        `${run.domainKey || nextDomain || "선택한 점검"} 전체 스캔 이력 ${run.scanCount || 1}건을 현재 분석 화면에 불러왔습니다. Overview, Findings, SQLMap, API Test에 반영됩니다.`
       );
     }
   }
@@ -5456,7 +5535,7 @@ window.addEventListener("load", () => {
                 <div className="recent-capture-panel section-panel">
                   <div className="recent-section-header">
                     <strong>Recent Capture Events</strong>
-                    <span>스캔한 도메인 목록만 표시합니다. 불러오기는 해당 도메인의 최신 완료 스캔을 복원합니다.</span>
+                    <span>스캔한 도메인 목록만 표시합니다. 불러오기는 해당 도메인의 전체 스캔 이력을 복원합니다.</span>
                   </div>
                   <div className="inspection-run-table">
                     {domainHistoryRuns.length === 0 ? (
