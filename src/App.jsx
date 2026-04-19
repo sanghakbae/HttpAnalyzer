@@ -61,6 +61,8 @@ const DEFAULT_OPENAI_SUMMARY_PROMPT = `다음 HTTP 캡처 결과를 한국어로
 5. SQLMap으로 점검할 후보 URL과 파라미터를 제안
 6. 개발자가 바로 수행할 다음 조치 체크리스트를 작성`;
 const CHUNK_RELOAD_STORAGE_KEY = "http-analyzer-chunk-reload-attempted";
+const HISTORY_PAGE_SIZE = 1000;
+const HISTORY_MAX_ROWS = 5000;
 
 const SEVERITY_LABELS = {
   critical: "Critical",
@@ -202,21 +204,47 @@ async function loadRecentFromSupabase() {
     };
   }
 
-  const [harResponse, eventsResponse, runsResponse] = await Promise.all([
+  const [harResponse, eventsResponse, inspectionRuns] = await Promise.all([
     supabase.from("capture_har_analyses").select("*").order("created_at", { ascending: false }).limit(10),
-    supabase.from("capture_http_events").select("*").order("created_at", { ascending: false }).limit(20),
-    supabase.from("capture_inspection_runs").select("*").order("created_at", { ascending: false }).limit(15)
+    supabase.from("capture_http_events").select("*").order("created_at", { ascending: false }).range(0, 499),
+    loadAllSupabaseRows("capture_inspection_runs", "created_at")
   ]);
 
-  if (harResponse.error || eventsResponse.error || runsResponse.error) {
-    throw harResponse.error || eventsResponse.error || runsResponse.error;
+  if (harResponse.error || eventsResponse.error) {
+    throw harResponse.error || eventsResponse.error;
   }
 
   return {
     harAnalyses: harResponse.data || [],
     captureEvents: eventsResponse.data || [],
-    inspectionRuns: runsResponse.data || []
+    inspectionRuns
   };
+}
+
+async function loadAllSupabaseRows(table, orderColumn) {
+  const rows = [];
+
+  for (let from = 0; from < HISTORY_MAX_ROWS; from += HISTORY_PAGE_SIZE) {
+    const to = Math.min(from + HISTORY_PAGE_SIZE - 1, HISTORY_MAX_ROWS - 1);
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .order(orderColumn, { ascending: false })
+      .range(from, to);
+
+    if (error) {
+      throw error;
+    }
+
+    const page = Array.isArray(data) ? data : [];
+    rows.push(...page);
+
+    if (page.length < HISTORY_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return rows;
 }
 
 function NavigationIcon({ name }) {
@@ -3509,7 +3537,7 @@ export default function App() {
       report_snapshot: snapshot
     };
 
-    setLocalInspectionRuns((current) => [localRun, ...current].slice(0, 20));
+    setLocalInspectionRuns((current) => [localRun, ...current]);
 
     const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
       method: "POST",
@@ -3859,9 +3887,7 @@ export default function App() {
         }))
         .filter((item) => !isAbortedErrorText(item.error_text));
 
-      setLocalInspectionRuns((current) =>
-        [localRun, ...current].slice(0, 20)
-      );
+      setLocalInspectionRuns((current) => [localRun, ...current]);
       setLocalCaptureEvents((current) =>
         [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 40)
       );
@@ -4745,7 +4771,7 @@ window.addEventListener("load", () => {
       key: "recent",
       icon: "recent",
       label: "Recent Data",
-      description: "도메인별 스캔 이력",
+      description: "이전 점검 전체 이력",
       count: mergedInspectionRuns.length
     },
     {
@@ -5298,13 +5324,13 @@ window.addEventListener("load", () => {
                 </div>
                 <div className="recent-capture-panel section-panel">
                   <div className="recent-section-header">
-                    <strong>Scanned Domains</strong>
-                    <span>도메인별 스캔 이력을 불러오면 모든 메뉴에 같은 결과가 반영됩니다.</span>
+                    <strong>Saved Inspection History</strong>
+                    <span>이전 점검 이력 전체를 불러와 현재 분석 화면과 모든 메뉴에 복원합니다.</span>
                   </div>
                   <div className="inspection-run-table">
                     {mergedInspectionRuns.length === 0 ? (
                       <span className="empty-copy">
-                        {recentLoading ? "불러오는 중..." : "최근 점검 이력이 없습니다."}
+                        {recentLoading ? "이전 이력을 불러오는 중..." : "저장된 이전 점검 이력이 없습니다."}
                       </span>
                     ) : (
                       mergedInspectionRuns.map((item) => {

@@ -690,7 +690,10 @@ async function loadRecentHarAnalyses(limit = 10) {
   return data || [];
 }
 
-async function loadRecentCaptureEvents(limit = 20) {
+const historyPageSize = 1000;
+const historyMaxRows = 5000;
+
+async function loadRecentCaptureEvents(limit = 500) {
   if (!supabase) {
     return [];
   }
@@ -708,22 +711,38 @@ async function loadRecentCaptureEvents(limit = 20) {
   return data || [];
 }
 
-async function loadRecentInspectionRuns(limit = 15) {
+async function loadAllSupabaseRows(table, orderColumn) {
   if (!supabase) {
     return [];
   }
 
-  const { data, error } = await supabase
-    .from("capture_inspection_runs")
-    .select("*")
-    .order("created_at", { ascending: false })
-    .limit(limit);
+  const rows = [];
 
-  if (error) {
-    throw error;
+  for (let from = 0; from < historyMaxRows; from += historyPageSize) {
+    const to = Math.min(from + historyPageSize - 1, historyMaxRows - 1);
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .order(orderColumn, { ascending: false })
+      .range(from, to);
+
+    if (error) {
+      throw error;
+    }
+
+    const page = Array.isArray(data) ? data : [];
+    rows.push(...page);
+
+    if (page.length < historyPageSize) {
+      break;
+    }
   }
 
-  return data || [];
+  return rows;
+}
+
+async function loadRecentInspectionRuns() {
+  return loadAllSupabaseRows("capture_inspection_runs", "created_at");
 }
 
 function attachCaptureListeners(page, targetHost) {
@@ -1501,8 +1520,8 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
 app.get("/api/recent-analyses", async (_request, response) => {
   const [harAnalyses, captureEvents, inspectionRuns] = await Promise.allSettled([
     loadRecentHarAnalyses(10),
-    loadRecentCaptureEvents(20),
-    loadRecentInspectionRuns(15)
+    loadRecentCaptureEvents(500),
+    loadRecentInspectionRuns()
   ]);
 
   const errors = [harAnalyses, captureEvents, inspectionRuns]
