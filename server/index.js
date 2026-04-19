@@ -22,6 +22,7 @@ app.use(express.json({ limit: "4mb" }));
 
 const supabaseUrl = process.env.SUPABASE_URL;
 const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const disableCapture = process.env.DISABLE_CAPTURE === "true";
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -513,6 +514,13 @@ app.get("/api/capture/status", (_request, response) => {
 });
 
 app.post("/api/capture/start", async (request, response) => {
+  if (disableCapture) {
+    response.status(403).json({
+      error: "Capture is disabled on this backend. Use the local app for browser capture."
+    });
+    return;
+  }
+
   const { domain, excludePatterns } = request.body ?? {};
 
   try {
@@ -535,8 +543,22 @@ app.post("/api/capture/start", async (request, response) => {
 });
 
 app.post("/api/capture/stop", async (_request, response) => {
+  if (disableCapture) {
+    response.json({ ok: true, disabled: true });
+    return;
+  }
+
   await closeCaptureBrowser();
   response.json({ ok: true });
+});
+
+app.get("/api/health", (_request, response) => {
+  response.json({
+    ok: true,
+    service: "http-analyzer-api",
+    supabaseConfigured: Boolean(supabase),
+    captureDisabled: disableCapture
+  });
 });
 
 app.post("/api/inspection-runs", async (request, response) => {
@@ -730,6 +752,7 @@ app.get("/api/recent-analyses", async (_request, response) => {
 });
 
 const port = process.env.PORT || 4000;
-app.listen(port, "127.0.0.1", () => {
-  console.log(`HAR analysis server listening on http://127.0.0.1:${port}`);
+const host = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
+app.listen(port, host, () => {
+  console.log(`HAR analysis server listening on http://${host}:${port}`);
 });

@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: http-analyzer-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm run start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: DISABLE_CAPTURE
+        value: "true"
+      - key: PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD
+        value: "true"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false

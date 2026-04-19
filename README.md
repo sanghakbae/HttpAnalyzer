@@ -118,13 +118,17 @@ cp .env.example .env
 예시:
 
 ```env
-VITE_API_BASE_URL=http://localhost:4000
+VITE_API_BASE_URL=https://http-analyzer-api.onrender.com
 VITE_SUPABASE_URL=https://<project-ref>.supabase.co
 VITE_SUPABASE_ANON_KEY=<publishable-or-anon-key>
 PORT=4000
+HOST=127.0.0.1
+DISABLE_CAPTURE=false
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 ```
+
+로컬에서 프런트와 백엔드를 같이 실행할 때는 `VITE_API_BASE_URL=http://localhost:4000`으로 바꿔도 됩니다.
 
 설명:
 
@@ -132,6 +136,10 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
   프런트에서 사용하는 값입니다.
 - `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`
   서버에서 HAR 분석 결과를 Supabase에 저장할 때 사용합니다.
+- `HOST`
+  로컬은 보통 `127.0.0.1`, Render 같은 배포 환경은 `0.0.0.0`을 사용합니다.
+- `DISABLE_CAPTURE`
+  배포 백엔드에서 Playwright 캡처 API를 막고 저장/조회 API만 운영하려면 `true`로 둡니다.
 
 ## 실행 방법
 
@@ -338,6 +346,80 @@ create table if not exists public.capture_inspection_runs (
 
 - `SUPABASE_SERVICE_ROLE_KEY`는 서버 전용입니다.
 - 프런트 코드에 직접 노출하면 안 됩니다.
+
+## GitHub Actions + Render 배포
+
+이 저장소는 프런트와 백엔드를 분리해서 배포하도록 구성되어 있습니다.
+
+- 프런트: GitHub Pages
+- 백엔드: Render Web Service
+- DB: Supabase
+
+### GitHub Actions 설정
+
+GitHub 저장소 `Settings > Secrets and variables > Actions`에 아래 값을 등록합니다.
+
+프런트 API URL은 저장소 변수(`Variables`)로 등록합니다. 값을 등록하지 않으면 GitHub Actions는 기본값으로 `https://http-analyzer-api.onrender.com`을 사용합니다.
+
+```text
+VITE_API_BASE_URL=https://http-analyzer-api.onrender.com
+```
+
+프런트 빌드용 Supabase 값은 시크릿(`Secrets`)으로 등록합니다.
+
+```text
+VITE_SUPABASE_URL=https://<project-ref>.supabase.co
+VITE_SUPABASE_ANON_KEY=<publishable-or-anon-key>
+```
+
+Render 자동 배포 트리거용:
+
+```text
+RENDER_DEPLOY_HOOK_URL=<render-deploy-hook-url>
+```
+
+`RENDER_DEPLOY_HOOK_URL`은 Render 서비스의 `Settings > Deploy Hook`에서 생성한 URL입니다. 이 값이 없으면 프런트 배포만 진행되고 백엔드 배포 트리거 단계는 건너뜁니다.
+
+### Render 환경변수
+
+Render Web Service에는 아래 값을 등록합니다.
+
+```text
+NODE_ENV=production
+HOST=0.0.0.0
+DISABLE_CAPTURE=true
+PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=true
+SUPABASE_URL=https://<project-ref>.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
+```
+
+현재 권장 운영 방식은 배포 백엔드를 저장/조회 API로만 쓰는 것입니다.
+
+- 동작: `/api/health`, `/api/recent-analyses`, `/api/inspection-runs`, `/api/capture-events/batch`, `/api/analyze-har`
+- 비활성화: `/api/capture/start`
+
+실제 브라우저 캡처와 Replay는 로컬 앱에서 사용하는 것을 권장합니다.
+
+### Render Blueprint
+
+`render.yaml`이 포함되어 있으므로 Render에서 Blueprint로 연결할 수 있습니다.
+
+- Service Name: `http-analyzer-api`
+- Build Command: `npm ci`
+- Start Command: `npm run start`
+- Health Check Path: `/api/health`
+- 예상 백엔드 URL: `https://http-analyzer-api.onrender.com`
+
+Render에서 서비스 이름이 이미 사용 중이면 실제 생성된 URL을 GitHub Actions 변수 `VITE_API_BASE_URL`에 다시 등록해야 합니다.
+
+### 배포 사이트 동작
+
+배포 사이트는 자동으로 조회 전용 모드로 동작합니다.
+
+- `Capture`, `HAR` 메뉴는 숨김
+- `Recent Data`는 Supabase에서 직접 조회
+- 로컬 앱에서 DB에 저장한 이력은 배포 사이트에서 확인 가능
+- 캡처/Replay/HAR 업로드는 로컬 앱에서 실행
 
 ### 현재 워크스페이스 상태
 

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { supabase } from "./lib/supabase";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
 const GOOGLE_CLIENT_ID =
@@ -9,6 +10,7 @@ const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
 const LOCAL_INSPECTION_RUNS_KEY = "http-analyzer-local-inspection-runs";
 const LOCAL_CAPTURE_EVENTS_KEY = "http-analyzer-local-capture-events";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
+const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
 const TOKEN_REGEX = new RegExp(
   `("(?:\\\\.|[^"])*":)|("(?:\\\\.|[^"])*")|('(?:\\\\.|[^'])*')|(<!--.*?-->)|(<!DOCTYPE[^>]*>)|(</?[\\w:-]+[^>]*>)|\\b\\d+(?:\\.\\d+)?\\b|\\btrue\\b|\\bfalse\\b|\\bnull\\b|[{}\\[\\](),:]`,
   "g"
@@ -160,6 +162,40 @@ function buildCaptureMermaid(exchanges) {
 
 function isAbortedErrorText(value) {
   return ABORTED_ERROR_REGEX.test(String(value || ""));
+}
+
+function isLocalRuntime() {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  return LOCAL_HOSTNAMES.has(window.location.hostname);
+}
+
+async function loadRecentFromSupabase() {
+  if (!supabase) {
+    return {
+      harAnalyses: [],
+      captureEvents: [],
+      inspectionRuns: []
+    };
+  }
+
+  const [harResponse, eventsResponse, runsResponse] = await Promise.all([
+    supabase.from("capture_har_analyses").select("*").order("created_at", { ascending: false }).limit(10),
+    supabase.from("capture_http_events").select("*").order("created_at", { ascending: false }).limit(20),
+    supabase.from("capture_inspection_runs").select("*").order("created_at", { ascending: false }).limit(15)
+  ]);
+
+  if (harResponse.error || eventsResponse.error || runsResponse.error) {
+    throw harResponse.error || eventsResponse.error || runsResponse.error;
+  }
+
+  return {
+    harAnalyses: harResponse.data || [],
+    captureEvents: eventsResponse.data || [],
+    inspectionRuns: runsResponse.data || []
+  };
 }
 
 function NavigationIcon({ name }) {
@@ -1978,6 +2014,7 @@ function MermaidModal({ code, onClose, onCopy }) {
 
 export default function App() {
   const appShellRef = useRef(null);
+  const readOnlyDeployment = !isLocalRuntime();
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => getStoredValue("http-analyzer-sidebar-collapsed") === "true"
@@ -2171,6 +2208,10 @@ export default function App() {
   }, [authUser]);
 
   useEffect(() => {
+    if (readOnlyDeployment) {
+      return;
+    }
+
     const syncCaptureStatus = async () => {
       try {
         const response = await fetch(`${API_BASE_URL}/api/capture/status`);
@@ -2204,18 +2245,26 @@ export default function App() {
     const timer = window.setInterval(syncCaptureStatus, 1000);
 
     return () => window.clearInterval(timer);
-  }, []);
+  }, [readOnlyDeployment]);
 
   useEffect(() => {
     const loadRecentAnalyses = async () => {
       setRecentLoading(true);
       try {
-        const response = await fetch(`${API_BASE_URL}/api/recent-analyses`);
-        if (!response.ok) {
-          return;
-        }
+        const data = readOnlyDeployment
+          ? await loadRecentFromSupabase()
+          : await fetch(`${API_BASE_URL}/api/recent-analyses`).then(async (response) => {
+              if (!response.ok) {
+                return {
+                  harAnalyses: [],
+                  captureEvents: [],
+                  inspectionRuns: []
+                };
+              }
 
-        const data = await response.json();
+              return response.json();
+            });
+
         setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
         setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
         setRecentInspectionRuns(Array.isArray(data.inspectionRuns) ? data.inspectionRuns : []);
@@ -2229,9 +2278,13 @@ export default function App() {
     loadRecentAnalyses();
     const timer = window.setInterval(loadRecentAnalyses, 15000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [readOnlyDeployment]);
 
   useEffect(() => {
+    if (readOnlyDeployment) {
+      return;
+    }
+
     const syncLocalQueue = async () => {
       const pendingRuns = localInspectionRuns.filter((item) => item.pending_sync);
       const pendingEvents = localCaptureEvents.filter((item) => item.pending_sync);
@@ -2310,7 +2363,17 @@ export default function App() {
     syncLocalQueue();
     const timer = window.setInterval(syncLocalQueue, 15000);
     return () => window.clearInterval(timer);
-  }, [localInspectionRuns, localCaptureEvents]);
+  }, [localInspectionRuns, localCaptureEvents, readOnlyDeployment]);
+
+  useEffect(() => {
+    if (!readOnlyDeployment) {
+      return;
+    }
+
+    if (["capture", "har"].includes(activeSection)) {
+      setActiveSection("recent");
+    }
+  }, [activeSection, readOnlyDeployment]);
 
   useEffect(() => {
     setStoredValue("http-analyzer-domain", domain);
@@ -2376,6 +2439,11 @@ export default function App() {
 
   async function startCapture(event) {
     event.preventDefault();
+    if (readOnlyDeployment) {
+      setStatusMessage("배포 사이트에서는 캡처를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     setSubmitting(true);
     setStatusMessage("");
 
@@ -2410,6 +2478,11 @@ export default function App() {
   }
 
   async function stopCapture() {
+    if (readOnlyDeployment) {
+      setStatusMessage("배포 사이트에서는 캡처를 중지할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     setSubmitting(true);
     setStatusMessage("");
 
@@ -2526,6 +2599,11 @@ export default function App() {
   }
 
   async function uploadHarFile() {
+    if (readOnlyDeployment) {
+      setHarUploadError("배포 사이트에서는 HAR 업로드를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     if (!harFile) {
       setHarUploadError("HAR 파일을 먼저 선택해주세요.");
       return;
@@ -2636,6 +2714,11 @@ export default function App() {
   }
 
   function injectPocIntoReplay(finding, exchange) {
+    if (readOnlyDeployment) {
+      setStatusMessage("배포 사이트에서는 Replay를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     if (!exchange.request) {
       return;
     }
@@ -3034,6 +3117,11 @@ window.addEventListener("load", () => {
   }
 
   function openReplayModal(exchange) {
+    if (readOnlyDeployment) {
+      setStatusMessage("배포 사이트에서는 Replay를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     if (!exchange.request) return;
     setReplayResponse(null);
     setReplayError("");
@@ -3046,6 +3134,11 @@ window.addEventListener("load", () => {
   }
 
   async function replayRequest() {
+    if (readOnlyDeployment) {
+      setReplayError("배포 사이트에서는 Replay를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
+      return;
+    }
+
     if (!modalState) return;
     setReplayLoading(true);
     setReplayError("");
@@ -3144,7 +3237,7 @@ window.addEventListener("load", () => {
       description: "최근 저장된 캡처 기록",
       count: mergedCaptureEvents.length + mergedInspectionRuns.length
     }
-  ];
+  ].filter((item) => !readOnlyDeployment || !["capture", "har"].includes(item.key));
 
   function navigateToSection(sectionKey) {
     if (sectionKey !== "findings") {
@@ -3268,6 +3361,12 @@ window.addEventListener("load", () => {
                 <strong>{mergedHarHistory.length}</strong>
               </div>
             </div>
+            {readOnlyDeployment ? (
+              <div className="readonly-banner">
+                배포 사이트는 조회 전용입니다. 캡처, Replay, HAR 업로드는 로컬 앱에서 실행하고
+                이 화면에서는 DB에 저장된 이력을 확인합니다.
+              </div>
+            ) : null}
 
             {activeSection === "capture" ? (
               <div className="capture-control-panel">
