@@ -2014,7 +2014,7 @@ function MermaidModal({ code, onClose, onCopy }) {
 
 export default function App() {
   const appShellRef = useRef(null);
-  const readOnlyDeployment = !isLocalRuntime();
+  const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => getStoredValue("http-analyzer-sidebar-collapsed") === "true"

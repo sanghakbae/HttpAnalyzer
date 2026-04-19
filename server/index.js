@@ -497,10 +497,6 @@ async function writeProxyRules(rules) {
   await fs.writeFile(proxyRulesPath, payload, "utf-8");
 }
 
-app.get("/api/health", (_request, response) => {
-  response.json({ ok: true });
-});
-
 app.get("/api/capture/status", (_request, response) => {
   response.json({
     active: Boolean(captureState.page),
