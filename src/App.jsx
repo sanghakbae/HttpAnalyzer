@@ -3271,6 +3271,14 @@ window.addEventListener("load", () => {
   const displayedFindingEntries = focusedFindingExchangeId
     ? findingEntries.filter(({ exchange }) => exchange.id === focusedFindingExchangeId)
     : findingEntries;
+  const capturedCount = visibleExchanges.length;
+  const totalCapturedCount = analyzedExchanges.length;
+  const captureErrorCount = visibleErrors.length;
+  const captureProgressPercent = active
+    ? Math.min(96, Math.max(12, capturedCount * 12))
+    : capturedCount > 0
+      ? 100
+      : 0;
 
   const navigationItems = [
     {
@@ -3377,6 +3385,23 @@ window.addEventListener("load", () => {
             ))}
           </nav>
           <div className={`backend-status-card ${backendHealth.ok ? "online" : "offline"}`}>
+            <div className="capture-progress-panel">
+              <div className="capture-progress-topline">
+                <strong>Capture</strong>
+                <span>{active ? "running" : "idle"}</span>
+              </div>
+              <div className="capture-progress-track" aria-label="capture progress">
+                <span
+                  className={active ? "active" : ""}
+                  style={{ width: `${captureProgressPercent}%` }}
+                />
+              </div>
+              <div className="capture-progress-meta">
+                <span>{capturedCount} captured</span>
+                <span>{totalCapturedCount} total</span>
+                <span>{captureErrorCount} errors</span>
+              </div>
+            </div>
             <div className="backend-status-topline">
               <span className="backend-status-dot" />
               <strong>Backend</strong>
