@@ -13,6 +13,8 @@
 - 구글 로그인 기반 접근 제어
 - 사이드 메뉴 기반 기능 분리(`Overview`, `Capture`, `Findings`, `HAR`, `Recent Data`)
 - 실시간 HTTP 요청/응답 캡처
+- Playwright 브라우저 기반 같은 도메인 크롤링 캡처
+- 크롤링 완료 또는 idle 상태 감지 시 자동 캡처 중지
 - 요청/응답 헤더 및 바디 확인
 - 특정 요청 재전송(Replay)
 - 캡처 흐름 기반 Mermaid 다이어그램 생성
@@ -124,6 +126,12 @@ VITE_SUPABASE_ANON_KEY=<publishable-or-anon-key>
 PORT=4000
 HOST=127.0.0.1
 DISABLE_CAPTURE=false
+PLAYWRIGHT_HEADLESS=true
+CAPTURE_READY_DELAY_MS=3000
+CAPTURE_IDLE_AUTO_STOP_MS=10000
+CAPTURE_CRAWL_ENABLED=true
+CAPTURE_CRAWL_MAX_PAGES=8
+CAPTURE_CRAWL_PAGE_DELAY_MS=1500
 SUPABASE_URL=https://<project-ref>.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
 ```
@@ -140,6 +148,12 @@ SUPABASE_SERVICE_ROLE_KEY=<service-role-key>
   로컬은 보통 `127.0.0.1`, Render 같은 배포 환경은 `0.0.0.0`을 사용합니다.
 - `DISABLE_CAPTURE`
   배포 백엔드에서 Playwright 캡처 API를 막고 저장/조회 API만 운영하려면 `true`로 둡니다.
+- `CAPTURE_READY_DELAY_MS`
+  첫 페이지 로드 후 캡처 준비를 위해 대기하는 시간입니다. 기본값은 `3000`입니다.
+- `CAPTURE_IDLE_AUTO_STOP_MS`
+  네트워크 활동이 없을 때 자동 중지하기까지 기다리는 시간입니다. 기본값은 `10000`입니다.
+- `CAPTURE_CRAWL_ENABLED`, `CAPTURE_CRAWL_MAX_PAGES`, `CAPTURE_CRAWL_PAGE_DELAY_MS`
+  캡처 시작 후 같은 도메인의 링크를 자동 순회할지, 최대 몇 페이지까지 볼지, 페이지 사이에 얼마나 기다릴지 설정합니다.
 
 ## 실행 방법
 
@@ -194,17 +208,19 @@ npm run dev
 
 ### 실시간 캡처
 
-1. 브라우저 또는 테스트 클라이언트의 프록시를 `127.0.0.1:8080`으로 설정합니다.
-2. `Capture` 화면에서 분석 대상 URL을 입력합니다.
-3. 필요하면 추가 제외 패턴을 입력합니다.
-4. `캡처 시작`을 누릅니다.
-5. 요청/응답 목록을 보면서 finding과 Diff를 확인합니다.
-6. 캡처를 종료하면 세션 요약이 점검 이력으로 저장됩니다.
+1. `Capture` 화면에서 분석 대상 URL을 입력합니다.
+2. 필요하면 추가 제외 패턴을 입력합니다.
+3. `캡처 시작`을 누르면 서버가 Playwright 브라우저를 열고 대상 URL로 이동합니다.
+4. 첫 페이지 로드 후 3초 대기한 뒤 같은 도메인의 링크를 최대 `CAPTURE_CRAWL_MAX_PAGES`개까지 자동 순회합니다.
+5. 크롤링이 완료되면 캡처가 자동 중지되고, 사이드바 진행 상태가 `complete`로 바뀝니다.
+6. 요청/응답 목록을 보면서 finding과 Diff를 확인합니다.
 
 참고:
 
 - 이미지 요청은 기본적으로 항상 제외됩니다.
 - `Excluded` 입력칸은 추가 제외 규칙만 받습니다.
+- `Capture` 사이드바에는 캡처된 요청 수, 전체 요청 수, 크롤링 페이지 수, 오류 수가 표시됩니다.
+- 수동으로 중지하고 싶으면 `캡처 중지`를 누르면 됩니다.
 - `Capture` 화면에서는 요청별 보안 finding 요약만 보여주고, 상세 내용은 `Findings` 메뉴에서 확인합니다.
 - `Findings에서 보기`를 누르면 해당 요청의 finding만 필터되어 바로 이동합니다.
 - 종료 과정에서 발생한 `net::ERR_ABORTED`는 종료성 노이즈로 간주해 UI와 Recent Data에서 숨깁니다.

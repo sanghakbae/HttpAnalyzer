@@ -21,6 +21,12 @@ services:
         value: "3000"
       - key: CAPTURE_IDLE_AUTO_STOP_MS
         value: "10000"
+      - key: CAPTURE_CRAWL_ENABLED
+        value: "true"
+      - key: CAPTURE_CRAWL_MAX_PAGES
+        value: "8"
+      - key: CAPTURE_CRAWL_PAGE_DELAY_MS
+        value: "1500"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

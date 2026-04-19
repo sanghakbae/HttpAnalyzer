@@ -27,6 +27,9 @@ const playwrightHeadless =
   process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
 const captureReadyDelayMs = Number(process.env.CAPTURE_READY_DELAY_MS || 3000);
 const captureIdleAutoStopMs = Number(process.env.CAPTURE_IDLE_AUTO_STOP_MS || 10000);
+const captureCrawlEnabled = process.env.CAPTURE_CRAWL_ENABLED !== "false";
+const captureCrawlMaxPages = Number(process.env.CAPTURE_CRAWL_MAX_PAGES || 8);
+const captureCrawlPageDelayMs = Number(process.env.CAPTURE_CRAWL_PAGE_DELAY_MS || 1500);
 const supabase =
   supabaseUrl && supabaseServiceRoleKey
     ? createClient(supabaseUrl, supabaseServiceRoleKey, {
@@ -48,6 +51,11 @@ const captureState = {
   stoppedAt: null,
   stopReason: null,
   idleTimer: null,
+  crawlActive: false,
+  crawlCompleted: false,
+  crawlVisited: [],
+  crawlQueue: [],
+  crawlMaxPages: captureCrawlMaxPages,
   exchanges: [],
   errors: []
 };
@@ -60,6 +68,11 @@ function resetCaptureCollections() {
   captureState.lastActivityAt = null;
   captureState.stoppedAt = null;
   captureState.stopReason = null;
+  captureState.crawlActive = false;
+  captureState.crawlCompleted = false;
+  captureState.crawlVisited = [];
+  captureState.crawlQueue = [];
+  captureState.crawlMaxPages = captureCrawlMaxPages;
 }
 
 function trimCollection(collection, max = 250) {
@@ -140,6 +153,8 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
   captureState.page = null;
   captureState.stoppedAt = new Date().toISOString();
   captureState.stopReason = reason;
+  captureState.crawlActive = false;
+  captureState.crawlCompleted = reason === "crawl-complete";
 
   if (clearMetadata) {
     captureState.startedAt = null;
@@ -149,6 +164,114 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.lastActivityAt = null;
     captureState.stoppedAt = null;
     captureState.stopReason = null;
+    captureState.crawlActive = false;
+    captureState.crawlCompleted = false;
+    captureState.crawlVisited = [];
+    captureState.crawlQueue = [];
+  }
+}
+
+function normalizeCrawlUrl(input, baseUrl, targetHost) {
+  try {
+    const parsedUrl = new URL(input, baseUrl);
+    parsedUrl.hash = "";
+
+    if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+      return null;
+    }
+
+    if (parsedUrl.host !== targetHost) {
+      return null;
+    }
+
+    return parsedUrl.toString();
+  } catch {
+    return null;
+  }
+}
+
+async function collectSameHostLinks(page, targetHost) {
+  const currentUrl = page.url();
+  const links = await page
+    .evaluate(() =>
+      [...document.querySelectorAll("a[href]")]
+        .map((anchor) => anchor.getAttribute("href"))
+        .filter(Boolean)
+    )
+    .catch(() => []);
+
+  return [
+    ...new Set(
+      links
+        .map((link) => normalizeCrawlUrl(link, currentUrl, targetHost))
+        .filter(Boolean)
+    )
+  ];
+}
+
+async function crawlCapturePages(page, targetUrl, targetHost, sessionId) {
+  if (!captureCrawlEnabled || !page || captureCrawlMaxPages <= 0) {
+    return;
+  }
+
+  const visited = new Set();
+  const queue = [targetUrl];
+  captureState.crawlActive = true;
+  captureState.crawlCompleted = false;
+  captureState.crawlVisited = [];
+  captureState.crawlQueue = [...queue];
+  captureState.crawlMaxPages = captureCrawlMaxPages;
+  clearCaptureIdleTimer();
+
+  while (
+    queue.length > 0 &&
+    visited.size < captureCrawlMaxPages &&
+    captureState.sessionId === sessionId &&
+    captureState.page
+  ) {
+    const nextUrl = queue.shift();
+    if (!nextUrl || visited.has(nextUrl)) {
+      continue;
+    }
+
+    visited.add(nextUrl);
+    captureState.crawlVisited = [...visited];
+    captureState.crawlQueue = [...queue];
+
+    try {
+      if (page.url() !== nextUrl) {
+        await page.goto(nextUrl, { waitUntil: "domcontentloaded", timeout: 30000 });
+      }
+
+      if (captureCrawlPageDelayMs > 0) {
+        await sleep(captureCrawlPageDelayMs);
+      }
+
+      const links = await collectSameHostLinks(page, targetHost);
+      for (const link of links) {
+        if (
+          !visited.has(link) &&
+          !queue.includes(link) &&
+          visited.size + queue.length < captureCrawlMaxPages
+        ) {
+          queue.push(link);
+        }
+      }
+      captureState.crawlQueue = [...queue];
+    } catch (error) {
+      captureState.errors.push({
+        id: nextUrl + "-" + Date.now(),
+        timestamp: new Date().toISOString(),
+        url: nextUrl,
+        method: "CRAWL",
+        errorText: error instanceof Error ? error.message : "Crawl navigation failed"
+      });
+      trimCollection(captureState.errors, 100);
+    }
+  }
+
+  if (captureState.sessionId === sessionId && captureState.page) {
+    await closeCaptureBrowser({ clearMetadata: false, reason: "crawl-complete" });
   }
 }
 
@@ -476,6 +599,23 @@ async function launchCaptureSession(domain, excludePatterns = []) {
   if (captureReadyDelayMs > 0) {
     await sleep(captureReadyDelayMs);
   }
+
+  if (captureCrawlEnabled) {
+    const sessionId = captureState.sessionId;
+    void crawlCapturePages(page, targetUrl, targetHost, sessionId).catch((error) => {
+      captureState.errors.push({
+        id: targetUrl + "-" + Date.now(),
+        timestamp: new Date().toISOString(),
+        url: targetUrl,
+        method: "CRAWL",
+        errorText: error instanceof Error ? error.message : "Crawl failed"
+      });
+      trimCollection(captureState.errors, 100);
+      if (captureState.sessionId === sessionId && captureState.page) {
+        void closeCaptureBrowser({ clearMetadata: false, reason: "crawl-error" });
+      }
+    });
+  }
 }
 
 function analyzeHar(har) {
@@ -589,6 +729,12 @@ app.get("/api/capture/status", (_request, response) => {
     stoppedAt: captureState.stoppedAt,
     stopReason: captureState.stopReason,
     idleAutoStopMs: captureIdleAutoStopMs,
+    crawlEnabled: captureCrawlEnabled,
+    crawlActive: captureState.crawlActive,
+    crawlCompleted: captureState.crawlCompleted,
+    crawlVisited: captureState.crawlVisited,
+    crawlQueueLength: captureState.crawlQueue.length,
+    crawlMaxPages: captureState.crawlMaxPages,
     exchanges: captureState.exchanges,
     errors: captureState.errors
   });
@@ -614,7 +760,9 @@ app.post("/api/capture/start", async (request, response) => {
       sessionId: captureState.sessionId,
       targetUrl: captureState.targetUrl,
       startedAt: captureState.startedAt,
-      excludePatterns: captureState.excludePatterns
+      excludePatterns: captureState.excludePatterns,
+      crawlEnabled: captureCrawlEnabled,
+      crawlMaxPages: captureState.crawlMaxPages
     });
   } catch (error) {
     response.status(400).json({
@@ -639,7 +787,10 @@ app.get("/api/health", (_request, response) => {
     service: "http-analyzer-api",
     supabaseConfigured: Boolean(supabase),
     captureDisabled: disableCapture,
-    captureIdleAutoStopMs
+    captureIdleAutoStopMs,
+    captureCrawlEnabled,
+    captureCrawlMaxPages,
+    captureCrawlPageDelayMs
   });
 });
 

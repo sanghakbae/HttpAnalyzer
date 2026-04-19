@@ -2076,6 +2076,14 @@ export default function App() {
   const [active, setActive] = useState(false);
   const [captureSessionId, setCaptureSessionId] = useState("");
   const [captureStartedAt, setCaptureStartedAt] = useState("");
+  const [captureMeta, setCaptureMeta] = useState({
+    stopReason: "",
+    crawlActive: false,
+    crawlCompleted: false,
+    crawlVisited: [],
+    crawlQueueLength: 0,
+    crawlMaxPages: 0
+  });
   const [exchanges, setExchanges] = useState([]);
   const [errors, setErrors] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -2299,7 +2307,7 @@ export default function App() {
         const autoStopped =
           wasActive &&
           !nextActive &&
-          data.stopReason === "idle" &&
+          ["idle", "crawl-complete", "crawl-error"].includes(data.stopReason) &&
           data.sessionId &&
           autoStoppedSessionRef.current !== data.sessionId;
 
@@ -2307,12 +2315,26 @@ export default function App() {
         setActive(nextActive);
         setCaptureSessionId(data.sessionId || "");
         setCaptureStartedAt(data.startedAt || "");
+        setCaptureMeta({
+          stopReason: data.stopReason || "",
+          crawlActive: Boolean(data.crawlActive),
+          crawlCompleted: Boolean(data.crawlCompleted),
+          crawlVisited: Array.isArray(data.crawlVisited) ? data.crawlVisited : [],
+          crawlQueueLength: Number(data.crawlQueueLength || 0),
+          crawlMaxPages: Number(data.crawlMaxPages || 0)
+        });
         setExchanges(data.exchanges || []);
         setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
 
         if (autoStopped) {
           autoStoppedSessionRef.current = data.sessionId;
-          setStatusMessage("네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.");
+          const autoStopMessage =
+            data.stopReason === "crawl-complete"
+              ? "크롤링이 완료되어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다."
+              : data.stopReason === "crawl-error"
+                ? "크롤링 중 오류가 발생해 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다."
+                : "네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.";
+          setStatusMessage(autoStopMessage);
 
           const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`).catch(() => null);
           if (recentResponse?.ok) {
@@ -2570,6 +2592,14 @@ export default function App() {
       setStatusMessage("");
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
+      setCaptureMeta({
+        stopReason: "",
+        crawlActive: Boolean(result.crawlEnabled),
+        crawlCompleted: false,
+        crawlVisited: [],
+        crawlQueueLength: 0,
+        crawlMaxPages: Number(result.crawlMaxPages || 0)
+      });
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
       setExchanges([]);
@@ -3304,8 +3334,20 @@ window.addEventListener("load", () => {
   const capturedCount = visibleExchanges.length;
   const totalCapturedCount = analyzedExchanges.length;
   const captureErrorCount = visibleErrors.length;
+  const crawledPageCount = captureMeta.crawlVisited.length;
+  const captureStateLabel = active
+    ? captureMeta.crawlActive
+      ? "crawling"
+      : "running"
+    : captureMeta.stopReason === "crawl-complete"
+      ? "complete"
+      : captureMeta.stopReason === "crawl-error"
+        ? "error"
+        : "idle";
   const captureProgressPercent = active
-    ? Math.min(96, Math.max(12, capturedCount * 12))
+    ? captureMeta.crawlMaxPages > 0
+      ? Math.min(96, Math.max(12, (crawledPageCount / captureMeta.crawlMaxPages) * 100))
+      : Math.min(96, Math.max(12, capturedCount * 12))
     : capturedCount > 0
       ? 100
       : 0;
@@ -3418,7 +3460,7 @@ window.addEventListener("load", () => {
             <div className="capture-progress-panel">
               <div className="capture-progress-topline">
                 <strong>Capture</strong>
-                <span>{active ? "running" : "idle"}</span>
+                <span>{captureStateLabel}</span>
               </div>
               <div className="capture-progress-track" aria-label="capture progress">
                 <span
@@ -3429,6 +3471,9 @@ window.addEventListener("load", () => {
               <div className="capture-progress-meta">
                 <span>{capturedCount} captured</span>
                 <span>{totalCapturedCount} total</span>
+                <span>
+                  {crawledPageCount}/{captureMeta.crawlMaxPages || "-"} pages
+                </span>
                 <span>{captureErrorCount} errors</span>
               </div>
             </div>
