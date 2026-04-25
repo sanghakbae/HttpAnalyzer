@@ -435,6 +435,10 @@ input {
   line-height: 1.7;
 }
 
+.login-card .page-title {
+  color: #ffffff;
+}
+
 .login-actions {
   margin-top: 24px;
   display: grid;

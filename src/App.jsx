@@ -1,5 +1,4 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
-import { supabase } from "./lib/supabase";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
 const GOOGLE_CLIENT_ID =
@@ -196,7 +195,7 @@ function isLocalRuntime() {
 }
 
 async function loadRecentFromSupabase() {
-  if (!supabase) {
+  if (!API_BASE_URL) {
     return {
       harAnalyses: [],
       captureEvents: [],
@@ -204,47 +203,16 @@ async function loadRecentFromSupabase() {
     };
   }
 
-  const [harResponse, eventsResponse, inspectionRuns] = await Promise.all([
-    supabase.from("capture_har_analyses").select("*").order("created_at", { ascending: false }).limit(10),
-    supabase.from("capture_http_events").select("*").order("created_at", { ascending: false }).range(0, 499),
-    loadAllSupabaseRows("capture_inspection_runs", "created_at")
-  ]);
-
-  if (harResponse.error || eventsResponse.error) {
-    throw harResponse.error || eventsResponse.error;
+  const response = await fetch(`${API_BASE_URL}/api/recent-analyses`);
+  if (!response.ok) {
+    return {
+      harAnalyses: [],
+      captureEvents: [],
+      inspectionRuns: []
+    };
   }
 
-  return {
-    harAnalyses: harResponse.data || [],
-    captureEvents: eventsResponse.data || [],
-    inspectionRuns
-  };
-}
-
-async function loadAllSupabaseRows(table, orderColumn) {
-  const rows = [];
-
-  for (let from = 0; from < HISTORY_MAX_ROWS; from += HISTORY_PAGE_SIZE) {
-    const to = Math.min(from + HISTORY_PAGE_SIZE - 1, HISTORY_MAX_ROWS - 1);
-    const { data, error } = await supabase
-      .from(table)
-      .select("*")
-      .order(orderColumn, { ascending: false })
-      .range(from, to);
-
-    if (error) {
-      throw error;
-    }
-
-    const page = Array.isArray(data) ? data : [];
-    rows.push(...page);
-
-    if (page.length < HISTORY_PAGE_SIZE) {
-      break;
-    }
-  }
-
-  return rows;
+  return response.json();
 }
 
 function NavigationIcon({ name }) {
@@ -2331,8 +2299,7 @@ function LoginScreen({ onLogin }) {
         <p className="login-eyebrow">Google Sign-In</p>
         <h1 className="page-title">HTTP Analyzer Login</h1>
         <p className="login-copy">
-          캡처와 HAR 분석 화면에 들어가기 전에 구글 계정으로 로그인하세요. 로그인 정보는
-          이 브라우저에만 저장됩니다.
+          캡처와 HAR 분석 화면에 들어가기 전에 구글 계정으로 로그인하세요.
         </p>
         <p className="login-copy">
           허용된 계정: <strong>{ALLOWED_GOOGLE_EMAIL}</strong>
