@@ -2882,10 +2882,10 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
           </div>
           <div className="action-row">
             <button type="button" onClick={() => onDownloadHtml(run)}>
-              HTML 재다운로드
+              html 다운로드
             </button>
             <button type="button" onClick={() => onDownloadPdf(run)}>
-              PDF 재다운로드
+              pdf 다운로드
             </button>
             <button type="button" onClick={onClose}>
               닫기
@@ -5625,6 +5625,91 @@ window.addEventListener("load", () => {
     [captureChecklistItems]
   );
   const renderedChecklistRows = checklistRows.length > 0 ? checklistRows : fallbackChecklistRows;
+  const findingSeverityCounts = useMemo(
+    () =>
+      allSecurityFindings.reduce(
+        (accumulator, finding) => ({
+          ...accumulator,
+          [finding.severity]: (accumulator[finding.severity] || 0) + 1
+        }),
+        { critical: 0, high: 0, medium: 0, low: 0 }
+      ),
+    [allSecurityFindings]
+  );
+  const latestInspectionRun = domainHistoryRuns[0] || null;
+  const latestHarHistory = normalizedHarHistory[0] || null;
+  const pendingLocalSyncCount =
+    localInspectionRuns.filter((item) => item.pending_sync).length +
+    localCaptureEvents.filter((item) => item.pending_sync).length +
+    localAiSummaries.filter((item) => item.pending_sync).length;
+  const overviewModuleCards = [
+    {
+      key: "capture",
+      label: "Capture",
+      value: active ? "Running" : capturedCount > 0 ? "Ready" : "Idle",
+      meta: `${capturedCount} captured / ${visibleErrors.length} errors`,
+      detail: domain || latestInspectionRun?.target_url || "No target domain",
+      action: "캡처 화면으로 이동"
+    },
+    {
+      key: "findings",
+      label: "Findings",
+      value: `${allSecurityFindings.length} findings`,
+      meta: `C ${findingSeverityCounts.critical || 0} / H ${findingSeverityCounts.high || 0} / M ${
+        findingSeverityCounts.medium || 0
+      } / L ${findingSeverityCounts.low || 0}`,
+      detail: highAlerts.length > 0 ? "High 이상 항목 우선 검증 필요" : "현재 High 이상 항목 없음",
+      action: "파인딩 보기"
+    },
+    {
+      key: "checklist",
+      label: "Vulnerability Checklist",
+      value: `${renderedChecklistRows.length} checks`,
+      meta: checklistRows.length > 0 ? "캡처 finding 기반" : "기본 점검 목록",
+      detail: "식별된 취약점 카테고리별 검증 기준",
+      action: "점검 목록 보기"
+    },
+    {
+      key: "har",
+      label: "HAR",
+      value: `${mergedHarHistory.length} runs`,
+      meta: latestHarHistory ? formatDateTime(latestHarHistory.displayCreatedAt) : "No HAR",
+      detail: latestHarHistory?.displayFileName || "HAR 파일 업로드 전",
+      action: "HAR 분석 보기"
+    },
+    {
+      key: "recent",
+      label: "Recent Data",
+      value: `${domainHistoryRuns.length} domains`,
+      meta: latestInspectionRun ? formatDateTime(latestInspectionRun.ended_at || latestInspectionRun.created_at) : "No scan",
+      detail: latestInspectionRun?.domainKey || latestInspectionRun?.target_url || "저장된 스캔 없음",
+      action: "이력 보기"
+    },
+    {
+      key: "sqlmap",
+      label: "SQLMap",
+      value: sqlmapResult ? "Result ready" : `${apiCapturedExchanges.length} candidates`,
+      meta: sqlmapLoading ? "Running" : "Manual scan",
+      detail: sqlmapForm.selectedExchangeId ? sqlmapForm.url || "선택된 후보 있음" : "Captured Candidates에서 선택",
+      action: "SQLMap 보기"
+    },
+    {
+      key: "api-test",
+      label: "API Test",
+      value: apiTestResult ? `${apiTestResult.status}` : `${apiCapturedExchanges.length} APIs`,
+      meta: apiTestLoading ? "Requesting" : "Replay-ready",
+      detail: apiTestForm.url || "캡처된 API 요청을 선택해 테스트",
+      action: "API 테스트 보기"
+    },
+    {
+      key: "settings",
+      label: "Settings",
+      value: openAiKey ? "OpenAI set" : "OpenAI empty",
+      meta: backendHealth.ok ? "Backend online" : "Backend issue",
+      detail: pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending local sync` : "Local queue synced",
+      action: "설정 보기"
+    }
+  ];
   const navigationItems = [
     {
       key: "overview",
@@ -6064,6 +6149,66 @@ window.addEventListener("load", () => {
           {activeSection === "overview" ? (
             <section className="pair-list">
               <article className="panel stacked-panel">
+                <div className="overview-command-center">
+                  <div className="overview-command-head">
+                    <div>
+                      <strong>Dashboard Overview</strong>
+                      <span>각 메뉴의 현재 상태와 다음 확인 지점을 한 화면에 모았습니다.</span>
+                    </div>
+                    <div className="overview-command-meta">
+                      <span>{backendHealth.ok ? "Backend Online" : "Backend Check Needed"}</span>
+                      <span>{pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending sync` : "DB synced"}</span>
+                    </div>
+                  </div>
+                  <div className="overview-module-grid">
+                    {overviewModuleCards.map((item) => (
+                      <button
+                        key={item.key}
+                        type="button"
+                        className="overview-module-card"
+                        onClick={() => setActiveSection(item.key)}
+                      >
+                        <span className="overview-module-label">{item.label}</span>
+                        <strong>{item.value}</strong>
+                        <span className="overview-module-meta">{item.meta}</span>
+                        <small>{item.detail}</small>
+                        <em>{item.action}</em>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="overview-snapshot-grid">
+                  <div className="overview-snapshot-card">
+                    <span>Current Target</span>
+                    <strong>{domain || latestInspectionRun?.domainKey || latestInspectionRun?.target_url || "-"}</strong>
+                    <small>
+                      Mode: {captureMode === "manual" ? "Manual window capture" : "Session capture"} ·{" "}
+                      {active ? "capturing" : "idle"}
+                    </small>
+                  </div>
+                  <div className="overview-snapshot-card">
+                    <span>Latest Stored Scan</span>
+                    <strong>{latestInspectionRun?.domainKey || latestInspectionRun?.target_url || "-"}</strong>
+                    <small>
+                      {latestInspectionRun
+                        ? `${formatDateTime(latestInspectionRun.ended_at || latestInspectionRun.created_at)} · ${
+                            latestInspectionRun.aggregate_total_exchanges ?? latestInspectionRun.total_exchanges ?? 0
+                          } requests`
+                        : "No stored inspection run"}
+                    </small>
+                  </div>
+                  <div className="overview-snapshot-card">
+                    <span>Recent HAR</span>
+                    <strong>{latestHarHistory?.displayFileName || "-"}</strong>
+                    <small>
+                      {latestHarHistory
+                        ? `${latestHarHistory.summary?.totalEntries ?? 0} entries · ${formatDateTime(
+                            latestHarHistory.displayCreatedAt
+                          )}`
+                        : "No HAR analysis"}
+                    </small>
+                  </div>
+                </div>
                 {criticalAlerts.length > 0 ? (
                   <div className="alert-banner critical-banner">
                     Critical findings {criticalAlerts.length}건이 감지되었습니다. 우선 `URL 민감정보`,
@@ -6282,13 +6427,13 @@ window.addEventListener("load", () => {
                                   type="button"
                                   onClick={() => downloadHtmlReport(getInspectionReportSnapshot(item))}
                                 >
-                                  HTML 재다운로드
+                                  html 다운로드
                                 </button>
                                 <button
                                   type="button"
                                   onClick={() => downloadPdfReport(getInspectionReportSnapshot(item))}
                                 >
-                                  PDF 재다운로드
+                                  pdf 다운로드
                                 </button>
                               </div>
                             </div>
