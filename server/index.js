@@ -51,6 +51,8 @@ const captureState = {
   browser: null,
   context: null,
   page: null,
+  closing: false,
+  captureMode: "manual",
   startedAt: null,
   sessionId: null,
   targetUrl: null,
@@ -61,6 +63,7 @@ const captureState = {
   idleTimer: null,
   crawlActive: false,
   crawlCompleted: false,
+  crawlEnabled: captureCrawlEnabled,
   crawlVisited: [],
   crawlQueue: [],
   crawlMaxPages: captureCrawlMaxPages,
@@ -70,7 +73,9 @@ const captureState = {
   sessionApplied: false,
   sessionStatus: "skipped",
   sessionError: "",
+  sessionValue: "",
   inspectionSaved: false,
+  eventsSaved: false,
   exchanges: [],
   errors: []
 };
@@ -137,11 +142,13 @@ async function rememberInspectionRun(payload, reason = "local") {
 function resetCaptureCollections() {
   captureState.exchanges = [];
   captureState.errors = [];
+  captureState.captureMode = "manual";
   captureState.lastActivityAt = null;
   captureState.stoppedAt = null;
   captureState.stopReason = null;
   captureState.crawlActive = false;
   captureState.crawlCompleted = false;
+  captureState.crawlEnabled = captureCrawlEnabled;
   captureState.crawlVisited = [];
   captureState.crawlQueue = [];
   captureState.crawlMaxPages = captureCrawlMaxPages;
@@ -151,7 +158,9 @@ function resetCaptureCollections() {
   captureState.sessionApplied = false;
   captureState.sessionStatus = "skipped";
   captureState.sessionError = "";
+  captureState.sessionValue = "";
   captureState.inspectionSaved = false;
+  captureState.eventsSaved = false;
 }
 
 function trimCollection(collection, max = 250) {
@@ -190,7 +199,7 @@ function clearCaptureIdleTimer() {
 function scheduleCaptureIdleStop() {
   clearCaptureIdleTimer();
 
-  if (!captureState.page || captureIdleAutoStopMs <= 0) {
+  if (!captureState.page || captureIdleAutoStopMs <= 0 || captureState.captureMode === "manual") {
     return;
   }
 
@@ -267,6 +276,41 @@ function buildInspectionRunFromCaptureState(reason = "manual") {
   };
 }
 
+function buildCaptureEventRowsFromCaptureState() {
+  const endedAt = captureState.stoppedAt || new Date().toISOString();
+  const visibleExchanges = captureState.exchanges.filter((exchange) => {
+    const requestUrl = exchange.request?.url || "";
+    const responseUrl = exchange.response?.url || "";
+    return !captureState.excludePatterns.some(
+      (pattern) =>
+        pattern &&
+        ((requestUrl && requestUrl.includes(pattern)) ||
+          (responseUrl && responseUrl.includes(pattern)))
+    );
+  });
+
+  return visibleExchanges
+    .slice(0, 250)
+    .map((exchange) => ({
+      capture_session_id: captureState.sessionId,
+      target_url: captureState.targetUrl,
+      request_timestamp: exchange.timestamp || endedAt,
+      request_method: exchange.request?.method || null,
+      request_url: exchange.request?.url || exchange.endpointKey || exchange.response?.url || null,
+      request_resource_type: exchange.request?.resourceType || null,
+      request_headers: exchange.request?.headers || {},
+      request_body: exchange.request?.postData || "",
+      response_timestamp: exchange.response?.timestamp || null,
+      response_url: exchange.response?.url || null,
+      response_status: exchange.response?.status || null,
+      response_status_text: exchange.response?.statusText || null,
+      response_headers: exchange.response?.headers || {},
+      response_body_preview: exchange.response?.bodyPreview || "",
+      error_text: null
+    }))
+    .filter((event) => event.request_url && !isAbortedErrorText(event.error_text));
+}
+
 async function persistCaptureInspectionRun(reason = "manual") {
   if (captureState.inspectionSaved || !captureState.sessionId || !captureState.targetUrl) {
     return;
@@ -278,7 +322,29 @@ async function persistCaptureInspectionRun(reason = "manual") {
   }
 }
 
+async function persistCaptureHttpEvents() {
+  if (captureState.eventsSaved || !captureState.sessionId || !captureState.targetUrl) {
+    return;
+  }
+
+  const events = buildCaptureEventRowsFromCaptureState();
+  if (events.length === 0) {
+    captureState.eventsSaved = true;
+    return;
+  }
+
+  const saved = await saveCaptureEventsBatch(events);
+  if (saved.saved) {
+    captureState.eventsSaved = true;
+  }
+}
+
 async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } = {}) {
+  if (captureState.closing) {
+    return;
+  }
+
+  captureState.closing = true;
   clearCaptureIdleTimer();
 
   if (captureState.page) {
@@ -307,8 +373,16 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
       error instanceof Error ? error.message : String(error)
     );
   });
+  await persistCaptureHttpEvents().catch((error) => {
+    console.warn(
+      "Failed to persist capture HTTP events:",
+      error instanceof Error ? error.message : String(error)
+    );
+  });
 
   if (clearMetadata) {
+    captureState.closing = false;
+    captureState.captureMode = "manual";
     captureState.startedAt = null;
     captureState.sessionId = null;
     captureState.targetUrl = null;
@@ -318,6 +392,7 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.stopReason = null;
     captureState.crawlActive = false;
     captureState.crawlCompleted = false;
+    captureState.crawlEnabled = captureCrawlEnabled;
     captureState.crawlVisited = [];
     captureState.crawlQueue = [];
     captureState.loginAttempted = false;
@@ -326,8 +401,13 @@ async function closeCaptureBrowser({ clearMetadata = true, reason = "manual" } =
     captureState.sessionApplied = false;
     captureState.sessionStatus = "skipped";
     captureState.sessionError = "";
+    captureState.sessionValue = "";
     captureState.inspectionSaved = false;
+    captureState.eventsSaved = false;
+    return;
   }
+
+  captureState.closing = false;
 }
 
 function parseSessionCookies(sessionValue, targetUrl) {
@@ -368,6 +448,66 @@ function parseSessionCookies(sessionValue, targetUrl) {
     .filter(Boolean);
 }
 
+function doesCookieMatchHost(cookie, targetHost) {
+  const cookieDomain = String(cookie?.domain || "")
+    .replace(/^\./, "")
+    .trim()
+    .toLowerCase();
+  const normalizedHost = String(targetHost || "").trim().toLowerCase();
+
+  if (!cookieDomain) {
+    return false;
+  }
+
+  return cookieDomain === normalizedHost || normalizedHost.endsWith(`.${cookieDomain}`);
+}
+
+function serializeCookiesForSession(cookies, targetHost) {
+  return (Array.isArray(cookies) ? cookies : [])
+    .filter((cookie) => cookie?.name && cookie?.value && doesCookieMatchHost(cookie, targetHost))
+    .map((cookie) => `${cookie.name}=${cookie.value}`)
+    .join("; ");
+}
+
+function buildCookieSignature(cookie) {
+  return [
+    cookie?.name || "",
+    cookie?.domain || "",
+    cookie?.path || "",
+    cookie?.value || ""
+  ].join("::");
+}
+
+async function refreshCapturedSessionValue(context, targetUrl) {
+  if (!context || !targetUrl) {
+    return "";
+  }
+
+  try {
+    const targetHost = new URL(targetUrl).hostname;
+    const cookies = await context.cookies().catch(() => []);
+    const sessionValue = serializeCookiesForSession(cookies, targetHost);
+
+    if (!sessionValue) {
+      return "";
+    }
+
+    captureState.sessionApplied = true;
+    captureState.sessionStatus = "captured";
+    captureState.sessionError = "";
+    captureState.sessionValue = sessionValue;
+
+    if (captureState.loginAttempted && captureState.loginStatus === "attempting") {
+      captureState.loginStatus = "succeeded";
+      captureState.loginError = "";
+    }
+
+    return sessionValue;
+  } catch {
+    return "";
+  }
+}
+
 async function applySessionValue(context, targetUrl, sessionValue) {
   const value = String(sessionValue || "").trim();
 
@@ -392,6 +532,7 @@ async function applySessionValue(context, targetUrl, sessionValue) {
 
     await context.addCookies(cookies);
     captureState.sessionStatus = "applied";
+    captureState.sessionValue = cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
     return true;
   } catch (error) {
     captureState.sessionStatus = "failed";
@@ -421,6 +562,85 @@ async function fillFirstVisible(page, selectors, value) {
   return null;
 }
 
+function getSearchableFrames(page) {
+  return page
+    .frames()
+    .filter((frame, index, frames) => frame && frames.indexOf(frame) === index);
+}
+
+async function fillFirstVisibleAcrossFrames(page, selectors, value) {
+  for (const frame of getSearchableFrames(page)) {
+    for (const selector of selectors) {
+      const locator = frame.locator(selector).first();
+      const count = await locator.count().catch(() => 0);
+      if (count === 0) {
+        continue;
+      }
+
+      const visible = await locator.isVisible().catch(() => false);
+      const editable = await locator.isEditable().catch(() => false);
+      if (!visible || !editable) {
+        continue;
+      }
+
+      await locator.fill(value);
+      return { frame, locator };
+    }
+  }
+
+  return null;
+}
+
+async function findFirstVisibleAcrossFrames(page, selectors) {
+  for (const frame of getSearchableFrames(page)) {
+    for (const selector of selectors) {
+      const locator = frame.locator(selector).first();
+      const count = await locator.count().catch(() => 0);
+      if (count === 0) {
+        continue;
+      }
+
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+
+      return { frame, locator };
+    }
+  }
+
+  return null;
+}
+
+async function clickAssociatedSubmit(passwordInput) {
+  if (!passwordInput?.locator) {
+    return false;
+  }
+
+  const field = passwordInput.locator;
+
+  const formSubmit = field.locator(
+    'xpath=ancestor::form[1]//*[self::button or self::input][(@type="submit") or normalize-space()="로그인" or normalize-space()="로그인하기" or normalize-space()="Login" or normalize-space()="Sign in" or normalize-space()="SIGN IN" or normalize-space()="Submit"]'
+  ).first();
+  const formSubmitCount = await formSubmit.count().catch(() => 0);
+  if (formSubmitCount > 0 && (await formSubmit.isVisible().catch(() => false))) {
+    await formSubmit.click().catch(() => {});
+    return true;
+  }
+
+  const nearbyButton = field.locator(
+    'xpath=ancestor::*[self::form or self::div or self::section][1]//*[self::button or self::input][(@type="submit") or normalize-space()="로그인" or normalize-space()="로그인하기" or normalize-space()="Login" or normalize-space()="Sign in" or normalize-space()="SIGN IN" or normalize-space()="Submit"]'
+  ).first();
+  const nearbyButtonCount = await nearbyButton.count().catch(() => 0);
+  if (nearbyButtonCount > 0 && (await nearbyButton.isVisible().catch(() => false))) {
+    await nearbyButton.click().catch(() => {});
+    return true;
+  }
+
+  await field.press("Enter").catch(() => {});
+  return true;
+}
+
 async function attemptPageLogin(page, credentials = {}) {
   const username = String(credentials.username || "").trim();
   const password = String(credentials.password || "");
@@ -437,7 +657,19 @@ async function attemptPageLogin(page, credentials = {}) {
   captureState.loginError = "";
 
   try {
-    const usernameInput = await fillFirstVisible(
+    const targetHost = new URL(captureState.targetUrl || page.url()).hostname;
+    const beforeUrl = page.url();
+    const beforePath = (() => {
+      try {
+        return new URL(beforeUrl).pathname;
+      } catch {
+        return beforeUrl;
+      }
+    })();
+    const startedOnLoginPage = /(login|signin|sign-in|auth)/i.test(beforePath);
+    const beforeCookies = await page.context().cookies().catch(() => []);
+    const beforeCookieSet = new Set(beforeCookies.map(buildCookieSignature));
+    const usernameInput = await fillFirstVisibleAcrossFrames(
       page,
       [
         'input[type="email"]',
@@ -454,7 +686,23 @@ async function attemptPageLogin(page, credentials = {}) {
       ],
       username
     );
-    const passwordInput = await fillFirstVisible(page, ['input[type="password"]'], password);
+    let passwordInput = await fillFirstVisibleAcrossFrames(page, ['input[type="password"]'], password);
+
+    if (!passwordInput && usernameInput) {
+      const nextButton = await findFirstVisibleAcrossFrames(page, [
+        'button:has-text("다음")',
+        'button:has-text("Next")',
+        'button:has-text("Continue")',
+        'button:has-text("계속")',
+        'button[type="submit"]',
+        'input[type="submit"]'
+      ]);
+      if (nextButton) {
+        await nextButton.locator.click().catch(() => {});
+      }
+      await sleep(800);
+      passwordInput = await fillFirstVisibleAcrossFrames(page, ['input[type="password"]'], password);
+    }
 
     if (!usernameInput || !passwordInput) {
       captureState.loginStatus = "not-found";
@@ -462,22 +710,15 @@ async function attemptPageLogin(page, credentials = {}) {
       return;
     }
 
-    const submitButton = page
-      .locator(
-        'button[type="submit"], input[type="submit"], button:has-text("로그인"), button:has-text("Login"), button:has-text("Sign in"), button:has-text("로그인하기")'
-      )
-      .first();
-    const hasSubmitButton = (await submitButton.count().catch(() => 0)) > 0;
-
-    if (hasSubmitButton && (await submitButton.isVisible().catch(() => false))) {
+    if (passwordInput) {
       await Promise.allSettled([
         page.waitForLoadState("domcontentloaded", { timeout: 10000 }),
-        submitButton.click()
+        clickAssociatedSubmit(passwordInput)
       ]);
     } else {
       await Promise.allSettled([
         page.waitForLoadState("domcontentloaded", { timeout: 10000 }),
-        passwordInput.press("Enter")
+        passwordInput.locator.press("Enter")
       ]);
     }
 
@@ -485,7 +726,52 @@ async function attemptPageLogin(page, credentials = {}) {
       await sleep(captureLoginWaitMs);
     }
 
-    captureState.loginStatus = "submitted";
+    await page.waitForLoadState("networkidle", { timeout: 5000 }).catch(() => {});
+
+    const passwordVisibleChecks = await Promise.all(
+      getSearchableFrames(page).map(async (frame) => {
+        const locator = frame.locator('input[type="password"]').first();
+        const count = await locator.count().catch(() => 0);
+        if (count === 0) {
+          return false;
+        }
+        return locator.isVisible().catch(() => false);
+      })
+    );
+    const passwordVisible = passwordVisibleChecks.some(Boolean);
+    const currentUrl = page.url();
+    const currentPath = (() => {
+      try {
+        return new URL(currentUrl).pathname;
+      } catch {
+        return currentUrl;
+      }
+    })();
+    const looksLikeLoginPage = /(login|signin|sign-in|auth)/i.test(currentPath);
+    const afterCookies = await page.context().cookies().catch(() => []);
+    const newCookies = afterCookies.filter((cookie) => !beforeCookieSet.has(buildCookieSignature(cookie)));
+    const newTargetHostCookies = newCookies.filter((cookie) => doesCookieMatchHost(cookie, targetHost));
+    const sessionValue = serializeCookiesForSession(afterCookies, targetHost);
+
+    if (sessionValue) {
+      captureState.sessionApplied = true;
+      captureState.sessionStatus = "captured";
+      captureState.sessionError = "";
+      captureState.sessionValue = sessionValue;
+    }
+
+    const movedAwayFromLogin =
+      startedOnLoginPage && currentUrl !== beforeUrl && !looksLikeLoginPage && !passwordVisible;
+    const loginSucceeded = Boolean(sessionValue) || movedAwayFromLogin || newTargetHostCookies.length > 0;
+
+    if (loginSucceeded) {
+      captureState.loginStatus = "succeeded";
+      captureState.loginError = "";
+      return;
+    }
+
+    captureState.loginStatus = "invalid-credentials";
+    captureState.loginError = "로그인에 실패했습니다. ID/PW를 확인해주세요.";
   } catch (error) {
     captureState.loginStatus = "failed";
     captureState.loginError = error instanceof Error ? error.message : "Login automation failed.";
@@ -711,19 +997,100 @@ async function saveAnalysisRecord(payload) {
 }
 
 async function saveCaptureRecord(payload) {
+  rememberCaptureEvent(payload, "deferred-until-stop");
+  return { saved: false, deferred: true };
+}
+
+function normalizeFingerprintTimestamp(value) {
+  const timestamp = Date.parse(value || "");
+  if (!Number.isFinite(timestamp)) {
+    return value || "";
+  }
+
+  return new Date(timestamp).toISOString();
+}
+
+function buildCaptureEventFingerprint(event) {
+  return [
+    event.capture_session_id || "",
+    normalizeFingerprintTimestamp(event.request_timestamp),
+    event.request_method || "",
+    event.request_url || "",
+    event.response_status ?? "",
+    event.error_text || ""
+  ].join("::");
+}
+
+async function saveCaptureEventsBatch(events) {
+  const validEvents = (Array.isArray(events) ? events : [])
+    .filter((event) => event && event.request_url && !isAbortedErrorText(event.error_text))
+    .map((event) => ({
+      capture_session_id: event.capture_session_id ?? null,
+      target_url: event.target_url ?? null,
+      request_timestamp: event.request_timestamp ?? null,
+      request_method: event.request_method ?? null,
+      request_url: event.request_url ?? null,
+      request_resource_type: event.request_resource_type ?? null,
+      request_headers: event.request_headers ?? {},
+      request_body: event.request_body ?? "",
+      response_timestamp: event.response_timestamp ?? null,
+      response_url: event.response_url ?? null,
+      response_status: event.response_status ?? null,
+      response_status_text: event.response_status_text ?? null,
+      response_headers: event.response_headers ?? {},
+      response_body_preview: event.response_body_preview ?? "",
+      error_text: event.error_text ?? null
+    }));
+
+  if (validEvents.length === 0) {
+    return { saved: true, count: 0, skipped: Array.isArray(events) ? events.length : 0 };
+  }
+
   if (!supabase) {
-    rememberCaptureEvent(payload, "Supabase credentials are not configured.");
     return { saved: false, reason: "Supabase credentials are not configured." };
   }
 
-  const { error } = await supabase.from("capture_http_events").insert(payload);
+  const sessionIds = [
+    ...new Set(
+      validEvents
+        .map((event) => event.capture_session_id)
+        .filter((sessionId) => isUuid(sessionId))
+    )
+  ];
+  const existingFingerprints = new Set();
+
+  if (sessionIds.length > 0) {
+    const { data: existingRows, error: lookupError } = await supabase
+      .from("capture_http_events")
+      .select("capture_session_id, request_timestamp, request_method, request_url, response_status, error_text")
+      .in("capture_session_id", sessionIds);
+
+    if (!lookupError && Array.isArray(existingRows)) {
+      for (const row of existingRows) {
+        existingFingerprints.add(buildCaptureEventFingerprint(row));
+      }
+    }
+  }
+
+  const eventsToInsert = validEvents.filter(
+    (event) => !existingFingerprints.has(buildCaptureEventFingerprint(event))
+  );
+
+  if (eventsToInsert.length === 0) {
+    return { saved: true, count: 0, skipped: validEvents.length };
+  }
+
+  const { error } = await supabase.from("capture_http_events").insert(eventsToInsert);
 
   if (error) {
-    rememberCaptureEvent(payload, error.message);
     return { saved: false, reason: error.message };
   }
 
-  return { saved: true };
+  return {
+    saved: true,
+    count: eventsToInsert.length,
+    skipped: validEvents.length - eventsToInsert.length
+  };
 }
 
 async function saveInspectionRun(payload) {
@@ -1039,6 +1406,7 @@ function attachCaptureListeners(page, targetHost) {
     }
 
     touchCaptureActivity();
+    void refreshCapturedSessionValue(page.context(), captureState.targetUrl);
 
     const id = request.url() + "-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
     const entry = {
@@ -1071,6 +1439,7 @@ function attachCaptureListeners(page, targetHost) {
     }
 
     touchCaptureActivity();
+    void refreshCapturedSessionValue(page.context(), captureState.targetUrl);
 
     let bodyPreview = "";
     try {
@@ -1142,6 +1511,7 @@ function attachCaptureListeners(page, targetHost) {
     }
 
     touchCaptureActivity();
+    void refreshCapturedSessionValue(page.context(), captureState.targetUrl);
 
     const failedEntry = {
       id: url + "-" + Date.now(),
@@ -1172,12 +1542,24 @@ function attachCaptureListeners(page, targetHost) {
       error_text: failedEntry.errorText
     }).catch(() => {});
   });
+
+  page.on("framenavigated", () => {
+    touchCaptureActivity();
+    void refreshCapturedSessionValue(page.context(), captureState.targetUrl);
+  });
+
+  page.on("close", () => {
+    if (page === captureState.page || page.context() === captureState.context) {
+      void closeCaptureBrowser({ clearMetadata: false, reason: "browser-closed" });
+    }
+  });
 }
 
 async function launchCaptureSession(domain, excludePatterns = [], authOptions = {}) {
   const targetUrl = normalizeUrl(domain);
   const parsedTargetUrl = new URL(targetUrl);
   const targetHost = parsedTargetUrl.host;
+  const captureMode = authOptions.captureMode === "session" ? "session" : "manual";
   const popupWidth = 1280;
   const popupHeight = 860;
   const screenWidth = 1728;
@@ -1204,6 +1586,12 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
       height: popupHeight - 96
     }
   });
+  browser.on("disconnected", () => {
+    void closeCaptureBrowser({ clearMetadata: false, reason: "browser-closed" });
+  });
+  context.on("close", () => {
+    void closeCaptureBrowser({ clearMetadata: false, reason: "browser-closed" });
+  });
   context.on("page", (newPage) => {
     attachCaptureListeners(newPage, targetHost);
   });
@@ -1212,6 +1600,7 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
 
   captureState.browser = browser;
   captureState.context = context;
+  captureState.captureMode = captureMode;
   captureState.startedAt = new Date().toISOString();
   captureState.sessionId = randomUUID();
   captureState.targetUrl = targetUrl;
@@ -1223,18 +1612,31 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   const page = await context.newPage();
   captureState.page = page;
   attachCaptureListeners(page, targetHost);
-  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-  scheduleCaptureIdleStop();
-
-  if (!sessionWasApplied) {
-    await attemptPageLogin(page, authOptions.credentials);
+  if (captureMode === "session") {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    scheduleCaptureIdleStop();
+  } else {
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
   }
 
-  if (captureReadyDelayMs > 0) {
+  if (!sessionWasApplied) {
+    captureState.loginAttempted = false;
+    captureState.loginStatus = "skipped";
+    captureState.loginError = "";
+  }
+
+  if (captureMode === "session") {
+    await refreshCapturedSessionValue(context, targetUrl);
+  }
+
+  if (captureMode === "session" && captureReadyDelayMs > 0) {
     await sleep(captureReadyDelayMs);
   }
 
-  if (captureCrawlEnabled) {
+  const shouldAutoCrawl = captureMode === "session" && captureCrawlEnabled;
+  captureState.crawlEnabled = shouldAutoCrawl;
+
+  if (shouldAutoCrawl) {
     const sessionId = captureState.sessionId;
     const crawlStartUrl = normalizeCrawlUrl(page.url(), targetUrl, targetHost) || targetUrl;
     void crawlCapturePages(page, crawlStartUrl, targetHost, sessionId).catch((error) => {
@@ -1356,6 +1758,7 @@ async function writeProxyRules(rules) {
 app.get("/api/capture/status", (_request, response) => {
   response.json({
     active: Boolean(captureState.page),
+    captureMode: captureState.captureMode,
     startedAt: captureState.startedAt,
     sessionId: captureState.sessionId,
     targetUrl: captureState.targetUrl,
@@ -1364,7 +1767,7 @@ app.get("/api/capture/status", (_request, response) => {
     stoppedAt: captureState.stoppedAt,
     stopReason: captureState.stopReason,
     idleAutoStopMs: captureIdleAutoStopMs,
-    crawlEnabled: captureCrawlEnabled,
+    crawlEnabled: captureState.crawlEnabled,
     crawlActive: captureState.crawlActive,
     crawlCompleted: captureState.crawlCompleted,
     crawlVisited: captureState.crawlVisited,
@@ -1376,6 +1779,7 @@ app.get("/api/capture/status", (_request, response) => {
     sessionApplied: captureState.sessionApplied,
     sessionStatus: captureState.sessionStatus,
     sessionError: captureState.sessionError,
+    sessionValue: captureState.sessionValue,
     exchanges: captureState.exchanges,
     errors: captureState.errors
   });
@@ -1389,7 +1793,7 @@ app.post("/api/capture/start", async (request, response) => {
     return;
   }
 
-  const { domain, excludePatterns, credentials, sessionValue } = request.body ?? {};
+  const { domain, excludePatterns, credentials, sessionValue, captureMode } = request.body ?? {};
 
   try {
     await launchCaptureSession(
@@ -1397,23 +1801,26 @@ app.post("/api/capture/start", async (request, response) => {
       Array.isArray(excludePatterns) ? excludePatterns.filter(Boolean) : [],
       {
         credentials: credentials && typeof credentials === "object" ? credentials : {},
-        sessionValue: typeof sessionValue === "string" ? sessionValue : ""
+        sessionValue: typeof sessionValue === "string" ? sessionValue : "",
+        captureMode: captureMode === "session" ? "session" : "manual"
       }
     );
     response.json({
       ok: true,
       sessionId: captureState.sessionId,
+      captureMode: captureState.captureMode,
       targetUrl: captureState.targetUrl,
       startedAt: captureState.startedAt,
       excludePatterns: captureState.excludePatterns,
-      crawlEnabled: captureCrawlEnabled,
+      crawlEnabled: captureState.crawlEnabled,
       crawlMaxPages: captureState.crawlMaxPages,
       loginAttempted: captureState.loginAttempted,
       loginStatus: captureState.loginStatus,
       loginError: captureState.loginError,
       sessionApplied: captureState.sessionApplied,
       sessionStatus: captureState.sessionStatus,
-      sessionError: captureState.sessionError
+      sessionError: captureState.sessionError,
+      sessionValue: captureState.sessionValue
     });
   } catch (error) {
     response.status(400).json({
@@ -1531,19 +1938,14 @@ app.post("/api/capture-events/batch", async (request, response) => {
     return;
   }
 
-  if (!supabase) {
-    response.status(400).json({ saved: false, reason: "Supabase credentials are not configured." });
+  const saved = await saveCaptureEventsBatch(events);
+
+  if (!saved.saved) {
+    response.status(400).json(saved);
     return;
   }
 
-  const { error } = await supabase.from("capture_http_events").insert(events);
-
-  if (error) {
-    response.status(400).json({ saved: false, reason: error.message });
-    return;
-  }
-
-  response.json({ saved: true, count: events.length });
+  response.json(saved);
 });
 
 app.post("/api/replay-request", async (request, response) => {

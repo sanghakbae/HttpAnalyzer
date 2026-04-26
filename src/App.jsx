@@ -8,6 +8,7 @@ const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
 const LOCAL_INSPECTION_RUNS_KEY = "http-analyzer-local-inspection-runs";
 const LOCAL_CAPTURE_EVENTS_KEY = "http-analyzer-local-capture-events";
+const LOCAL_LIVE_CAPTURE_KEY = "http-analyzer-live-capture";
 const LOCAL_AI_SUMMARIES_KEY = "http-analyzer-local-ai-summaries";
 const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
@@ -33,6 +34,8 @@ const SERVER_DISCLOSURE_REGEX =
   /\b(nginx\/\d|apache\/\d|iis\/\d|php\/\d|express|node\.js|gunicorn\/\d|uvicorn\/\d|tomcat\/\d)\b/i;
 const SQLI_REGEX =
   /(?:'|"|%27|%22)\s*(?:or|and)\s*(?:'?\d+'?\s*=\s*'?\d+'?|true|false)|union\s+select|sleep\s*\(|benchmark\s*\(|waitfor\s+delay|information_schema|load_file\s*\(/i;
+const SQL_ERROR_DISCLOSURE_REGEX =
+  /(sql syntax.*mysql|you have an error in your sql syntax|warning.*mysql_|mysql_fetch_|unknown column .* in 'field list'|unclosed quotation mark after the character string|quoted string not properly terminated|syntax error at or near|org\.postgresql\.util\.PSQLException|pg_query\(|sqlstate\[[^\]]+\]|sqlite(?:_|\/|\.)|SQLite.Exception|ODBC SQL Server Driver|OLE DB Provider for SQL Server|ORA-\d{5})/i;
 const XSS_REGEX =
   /<script\b|javascript:|onerror\s*=|onload\s*=|<img[^>]+src=|<svg[^>]+onload=|document\.cookie|alert\s*\(/i;
 const JS_SECRET_LITERAL_REGEX =
@@ -242,6 +245,17 @@ function NavigationIcon({ name }) {
           <path d="M4 8.5 12 4l8 4.5v7L12 20l-8-4.5z" />
           <path d="M12 11.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z" />
           <path d="M8.5 9.5h.01M15.5 9.5h.01" />
+        </svg>
+      );
+    case "checklist":
+      return (
+        <svg {...commonProps}>
+          <path d="M9 6h11" />
+          <path d="M9 12h11" />
+          <path d="M9 18h11" />
+          <path d="m4 6 1.2 1.2L7.5 4.9" />
+          <path d="m4 12 1.2 1.2 2.3-2.3" />
+          <path d="m4 18 1.2 1.2 2.3-2.3" />
         </svg>
       );
     case "findings":
@@ -554,6 +568,10 @@ function extractSqlmapCandidateParams(exchange) {
   }
 
   return params;
+}
+
+function isSqlmapRelevantFinding(finding) {
+  return ["sqli-pattern", "sqli-review-candidate", "sqli-error-disclosure"].includes(finding?.key);
 }
 
 function getCombinedExcludePatterns(input) {
@@ -1044,6 +1062,7 @@ function buildPeriodStats(runs) {
     return {
       ...windowInfo,
       runCount: filtered.length,
+      domainCount: new Set(filtered.map((item) => getRunDomainKey(item))).size,
       totalFindings: filtered.reduce((sum, item) => sum + Number(item.total_findings || 0), 0),
       criticalFindings: filtered.reduce((sum, item) => sum + Number(item.critical_findings || 0), 0),
       highFindings: filtered.reduce((sum, item) => sum + Number(item.high_findings || 0), 0),
@@ -1082,6 +1101,375 @@ function generateFindingPoc(finding, exchange) {
     `Headers: ${headers || "{}"}`,
     `Body/Payload: ${payload || "(none)"}`
   ].join("\n");
+}
+
+const FINDING_DISPLAY_META = {
+  "sensitive-data-in-url": {
+    title: "Sensitive Data in URL",
+    summary: "Secrets or one-time tokens appear in request/response URLs and can leak through logs, browser history, or referrers.",
+    remediation: "Move secrets out of query strings into headers or POST bodies, then mask or purge existing logs.",
+    example: "Example: /callback?access_token=... or /reset?code=..."
+  },
+  "secret-exposed-in-response-body": {
+    title: "Secret Exposed in Response Body",
+    summary: "The response appears to contain a token, API key, private key, or other sensitive material.",
+    remediation: "Return only required fields, rotate exposed credentials, and exclude secrets from serialization.",
+    example: "Example: JWT/API key/private key block returned inside JSON, HTML, or JS."
+  },
+  "sensitive-request-payload": {
+    title: "Sensitive Data in Request Payload",
+    summary: "The request body carries credentials or secrets that may be captured by logs, tracing tools, or exception reports.",
+    remediation: "Mask sensitive fields end-to-end and confirm the endpoint is HTTPS-only.",
+    example: "Example: password=..., token=..., secret=... stored in request logging."
+  },
+  "basic-auth-observed": {
+    title: "Basic Authentication Observed",
+    summary: "Basic authentication was detected and may be exposed through logs, proxies, or replay if not tightly controlled.",
+    remediation: "Prefer session or token-based auth. If Basic auth remains, enforce HTTPS and log masking.",
+    example: "Example: Authorization: Basic dXNlcjpwYXNz"
+  },
+  "absolute-location-observed": {
+    title: "Absolute Redirect Location Review",
+    summary: "A full absolute URL was observed in the Location header and may become an open redirect if user-controlled.",
+    remediation: "Allow only internal paths or explicit allowlisted external destinations.",
+    example: "Example: Location: https://evil.example/phish"
+  },
+  "cors-wildcard-with-credentials": {
+    title: "CORS Wildcard with Credentials",
+    summary: "The server appears to allow any origin while also allowing credentialed requests, which is highly dangerous.",
+    remediation: "Replace wildcard CORS with a strict allowlist and never combine '*' with credentialed responses.",
+    example: "Example: ACAO:* with ACAC:true for authenticated API responses."
+  },
+  "cors-origin-reflection-review": {
+    title: "Reflected Origin CORS Review",
+    summary: "The response may be reflecting the request Origin value and should be validated against a strict allowlist.",
+    remediation: "Use exact origin matching and test hostile origins, subdomains, ports, and scheme variations.",
+    example: "Example: Request Origin is echoed back in Access-Control-Allow-Origin."
+  },
+  "missing-httponly-cookie": {
+    title: "Session Cookie Missing HttpOnly",
+    summary: "A session or auth cookie is missing the HttpOnly flag and may be stolen if XSS is present.",
+    remediation: "Set HttpOnly on all session and auth cookies and verify proxy/framework rewrite behavior.",
+    example: "Example: Set-Cookie: SESSIONID=... without HttpOnly"
+  },
+  "missing-secure-cookie": {
+    title: "HTTPS Cookie Missing Secure",
+    summary: "A cookie used over HTTPS is missing the Secure flag and may be sent over downgraded or unintended channels.",
+    remediation: "Set Secure on all production auth cookies and verify forwarded-proto handling behind proxies.",
+    example: "Example: Set-Cookie: SESSIONID=... without Secure"
+  },
+  "missing-samesite-cookie": {
+    title: "Cookie Missing SameSite Policy",
+    summary: "The cookie does not explicitly define SameSite and may rely on browser defaults or expose CSRF surface.",
+    remediation: "Set SameSite=Lax or Strict by default, or None+Secure only when cross-site behavior is required.",
+    example: "Example: Session cookie set with no SameSite attribute"
+  },
+  "samesite-none-without-secure-cookie": {
+    title: "SameSite=None Without Secure",
+    summary: "A cookie allows cross-site sending but is not marked Secure, which is invalid or unsafe in modern browsers.",
+    remediation: "Pair SameSite=None with Secure, or reduce scope to Lax/Strict if cross-site use is unnecessary.",
+    example: "Example: Set-Cookie: token=...; SameSite=None"
+  },
+  "missing-csp": {
+    title: "Missing Content Security Policy",
+    summary: "HTML content is being served without a CSP, reducing browser-side mitigation against script injection.",
+    remediation: "Deploy a baseline CSP and tighten script execution with nonce/hash-based rules where possible.",
+    example: "Example: HTML page renders without any Content-Security-Policy header."
+  },
+  "missing-clickjacking-protection": {
+    title: "Missing Clickjacking Protection",
+    summary: "No X-Frame-Options or frame-ancestors protection was observed for HTML content.",
+    remediation: "Set X-Frame-Options and/or CSP frame-ancestors to restrict framing.",
+    example: "Example: Sensitive UI can be embedded in an attacker-controlled iframe."
+  },
+  "missing-x-content-type-options": {
+    title: "Missing X-Content-Type-Options",
+    summary: "The response is missing nosniff protection, which can increase MIME confusion risk.",
+    remediation: "Add X-Content-Type-Options: nosniff to application responses.",
+    example: "Example: Browser may sniff an uploaded file as executable content."
+  },
+  "missing-hsts": {
+    title: "Missing HSTS",
+    summary: "HTTPS is used but HSTS was not observed, leaving room for downgrade or first-visit interception.",
+    remediation: "Enable HSTS with a suitable max-age and includeSubDomains when appropriate.",
+    example: "Example: First request can be intercepted before HTTPS becomes sticky."
+  },
+  "server-version-disclosure": {
+    title: "Server Version Disclosure",
+    summary: "Server or framework version details appear to be exposed in headers or responses.",
+    remediation: "Suppress version banners and keep inventory internally rather than public-facing.",
+    example: "Example: Server: nginx/1.x or X-Powered-By: Express"
+  },
+  "stack-trace-disclosure": {
+    title: "Detailed Error / Stack Trace Disclosure",
+    summary: "The response appears to expose stack traces, class names, file paths, or database/framework internals.",
+    remediation: "Return generic production errors and route diagnostic details to protected logs only.",
+    example: "Example: stack trace, ORM exception, SQL syntax error, or internal file path in response."
+  },
+  "5xx-observed": {
+    title: "5xx Server Error Observed",
+    summary: "A server-side error was observed and may indicate instability or an input handling weakness worth reproducing.",
+    remediation: "Correlate with server logs, compare against expected inputs, and verify whether the failure is user-triggerable.",
+    example: "Example: 500/502/503 responses on input-driven endpoints."
+  },
+  "directory-indexing": {
+    title: "Directory Listing Exposed",
+    summary: "Directory indexing may be enabled, exposing file names, backup artifacts, or internal assets.",
+    remediation: "Disable directory listing and restrict file exposure to explicit routes only.",
+    example: "Example: /uploads/ or /backup/ shows a browsable file list."
+  },
+  "js-secret-literal": {
+    title: "JavaScript Secret / Token Exposure",
+    summary: "A JavaScript asset appears to contain tokens, keys, or internal secret-like literals.",
+    remediation: "Move secrets server-side, rotate exposed values, and scan built bundles before release.",
+    example: "Example: API key, bearer token, or internal secret string inside a JS bundle."
+  },
+  "js-dom-xss-source-to-sink": {
+    title: "DOM XSS Source-to-Sink Flow",
+    summary: "A likely path exists from URL or document-controlled input into an executable HTML/JS sink.",
+    remediation: "Replace unsafe sinks with safe DOM APIs and sanitize untrusted inputs context-appropriately.",
+    example: "Example: location.hash/search -> innerHTML, document.write, eval"
+  },
+  "js-dangerous-sink-usage": {
+    title: "Dangerous JavaScript Sink Usage",
+    summary: "A risky sink such as eval, Function, innerHTML, or document.write appears in the client code.",
+    remediation: "Eliminate dynamic code execution and gate HTML rendering through safe APIs or sanitizers.",
+    example: "Example: eval(), new Function(), innerHTML=, document.write()"
+  },
+  "js-postmessage-wildcard-target": {
+    title: "postMessage Wildcard Target",
+    summary: "postMessage appears to use '*' as targetOrigin, which may expose data to unintended windows.",
+    remediation: "Use exact target origins and validate origin/source on the receiving side.",
+    example: "Example: window.postMessage(payload, '*')"
+  },
+  "js-source-map-exposure": {
+    title: "Source Map Exposure",
+    summary: "A source map URL or .map file appears to be exposed and may reveal internal source structure.",
+    remediation: "Disable public source maps in production or restrict access to them.",
+    example: "Example: app.js.map downloadable from the public site."
+  },
+  "js-debug-artifact": {
+    title: "Debug Artifact in Production JavaScript",
+    summary: "Debug statements or verbose logging remain in production-facing JavaScript.",
+    remediation: "Strip debugger/console noise in production builds and avoid logging sensitive runtime data.",
+    example: "Example: debugger; or verbose console logs in deployed bundles."
+  },
+  "missing-referrer-policy": {
+    title: "Missing Referrer Policy",
+    summary: "The response does not define Referrer-Policy and may leak URL data during outbound navigation.",
+    remediation: "Use a strict referrer policy such as strict-origin-when-cross-origin or stronger.",
+    example: "Example: Sensitive query parameters are sent to third parties via Referer."
+  },
+  "sensitive-response-cache-control": {
+    title: "Sensitive Response Missing Cache Controls",
+    summary: "A sensitive response may be cacheable when it should be marked private or no-store.",
+    remediation: "Use Cache-Control: private, no-store for authenticated or personal responses.",
+    example: "Example: Account/profile API response cached in browser or shared proxy."
+  },
+  "sqli-pattern": {
+    title: "SQL Injection Pattern",
+    summary: "Input resembling SQL injection payloads was observed in a request and should be verified for impact.",
+    remediation: "Use parameterized queries everywhere and compare status/body/timing across malicious and benign inputs.",
+    example: "Example: id=1' OR '1'='1, UNION SELECT NULL--, SLEEP(5)"
+  },
+  "sqli-error-disclosure": {
+    title: "SQL Error Disclosure",
+    summary: "Database or SQL error signatures appear in the response and may indicate injection reachability.",
+    remediation: "Hide DB errors from clients, inspect query construction, and verify with targeted SQLMap tests.",
+    example: "Example: MySQL, PostgreSQL, Oracle, SQLite error text exposed to the client."
+  },
+  "sqli-review-candidate": {
+    title: "SQLMap Review Candidate",
+    summary: "This endpoint has request parameters that make it a practical SQLMap candidate even without direct proof yet.",
+    remediation: "Run SQLMap with the correct method, session context, and candidate parameters from this exchange.",
+    example: "Example: query/body/json/path parameters on stateful API endpoints."
+  },
+  "xss-pattern": {
+    title: "XSS Payload or Reflection Pattern",
+    summary: "Input or response content suggests possible reflected/stored XSS behavior.",
+    remediation: "Apply context-aware output encoding, safe rendering patterns, sanitization, and CSP hardening.",
+    example: "Example: <script>alert(1)</script>, \"><img src=x onerror=alert(1)>"
+  },
+  "path-traversal-pattern": {
+    title: "Path Traversal Pattern",
+    summary: "The request contains traversal syntax that could escape intended directories if backend validation is weak.",
+    remediation: "Avoid direct path concatenation and enforce allowlisted file identifiers with root-bound validation.",
+    example: "Example: ../../etc/passwd, ..%2f..%2fapp.env"
+  },
+  "command-injection-pattern": {
+    title: "Command Injection Pattern",
+    summary: "The request contains shell chaining or process execution patterns that may be dangerous if passed to a shell.",
+    remediation: "Replace shell execution with safe library calls or strict argument-array invocation.",
+    example: "Example: 127.0.0.1; id, test && whoami, $(cat /etc/passwd)"
+  },
+  "open-redirect-pattern": {
+    title: "Open Redirect Pattern",
+    summary: "A redirect parameter appears to accept external destinations and should be validated against an allowlist.",
+    remediation: "Allow only internal paths or signed / allowlisted destinations.",
+    example: "Example: /login?next=https://evil.example/phish"
+  },
+  "ssrf-pattern": {
+    title: "SSRF Target Pattern",
+    summary: "A parameter appears to target internal or metadata endpoints and may indicate SSRF surface.",
+    remediation: "Validate outbound destinations strictly and block private, loopback, and metadata address spaces.",
+    example: "Example: url=http://169.254.169.254/latest/meta-data"
+  }
+};
+
+const FINDING_ATTACK_EXAMPLES = {
+  "sensitive-data-in-url": "예: /callback?access_token=... 또는 /reset?code=... 형태로 토큰이 URL에 포함됨",
+  "secret-exposed-in-response-body": "예: 응답 JSON/HTML/JS 안에 JWT, API Key, private key 헤더가 그대로 노출됨",
+  "sensitive-request-payload": "예: password, token, secret 값이 요청 body에 포함된 채 로그/추적 시스템으로 저장됨",
+  "basic-auth-observed": "예: Authorization: Basic dXNlcjpwYXNz 를 재사용하거나 프록시 로그에서 탈취",
+  "absolute-location-observed": "예: Location: https://evil.example/phish 로 외부 절대 URL 리다이렉트",
+  "cors-wildcard-with-credentials": "예: Origin: https://evil.example 요청에 ACAO:* 와 ACAC:true가 함께 응답됨",
+  "cors-origin-reflection-review": "예: 임의 Origin 값을 넣었을 때 Access-Control-Allow-Origin 이 그대로 반사됨",
+  "missing-csp": "예: HTML 응답에서 <script>alert(1)</script> 같은 XSS payload가 CSP 없이 실행될 수 있음",
+  "missing-clickjacking-protection": "예: 민감 페이지를 iframe에 넣고 투명 레이어로 클릭 유도",
+  "missing-x-content-type-options": "예: 업로드 파일을 브라우저가 스크립트로 MIME sniff 하여 실행",
+  "missing-hsts": "예: 최초 HTTP 접근을 가로채 HTTPS 강제 전환 전에 세션 탈취 시도",
+  "server-version-disclosure": "예: Server/X-Powered-By 헤더의 버전 정보를 바탕으로 취약 버전 공격 시도",
+  "stack-trace-disclosure": "예: 예외 페이지에서 소스 경로, ORM/DB 쿼리, 내부 클래스명 노출",
+  "directory-listing-exposed": "예: /uploads/, /backup/ 경로에서 파일 목록과 백업본 직접 열람",
+  "js-secret-literal": "예: JS 번들 안의 API Key, Bearer token, internal endpoint를 재사용",
+  "js-dom-xss-source-to-sink": "예: URL hash/search 값이 innerHTML/eval sink로 흘러 DOM XSS 발생",
+  "js-dangerous-sink-usage": "예: eval(), document.write(), innerHTML 에 사용자 입력이 들어감",
+  "js-postmessage-wildcard-target": "예: postMessage('*') 로 토큰/상태값이 다른 창에 전달됨",
+  "js-source-map-exposure": "예: app.js.map 다운로드 후 원본 소스와 내부 API 경로 분석",
+  "js-debug-artifact": "예: console/debugger 잔존으로 민감 응답과 내부 흐름 추적 가능",
+  "missing-referrer-policy": "예: 외부 링크 이동 시 민감 파라미터가 Referer 로 전송",
+  "sensitive-response-cache-control": "예: 개인정보 응답이 브라우저/프록시 캐시에 남아 재표시",
+  "sqli-pattern": "예: id=1' OR '1'='1, UNION SELECT NULL--, SLEEP(5)",
+  "sqli-error-disclosure": "예: You have an error in your SQL syntax, ORA-xxxxx, PSQLException 응답 노출",
+  "sqli-review-candidate": "예: query/body/json/path 파라미터가 있는 API를 SQLMap으로 자동 점검",
+  "xss-pattern": "예: <script>alert(1)</script>, \"><img src=x onerror=alert(1)>",
+  "path-traversal-pattern": "예: ../../etc/passwd, ..%2f..%2fapp.env",
+  "command-injection-pattern": "예: 127.0.0.1; id, test && whoami, $(cat /etc/passwd)",
+  "open-redirect-pattern": "예: /login?next=https://evil.example/phish",
+  "ssrf-pattern": "예: url=http://169.254.169.254/latest/meta-data 또는 내부 127.0.0.1 대상 호출"
+};
+
+function buildChecklistRowsFromFindings(findings) {
+  const groups = new Map();
+
+  for (const finding of findings || []) {
+    if (!finding?.key) {
+      continue;
+    }
+
+    const categoryKey = getChecklistCategoryKey(finding.key);
+    const displayMeta = FINDING_DISPLAY_META[categoryKey] || {};
+    const bucket = groups.get(categoryKey) || {
+      key: categoryKey,
+      title: displayMeta.title || finding.title,
+      highestSeverity: finding.severity || "low",
+      highestSeverityLabel: finding.severityLabel || SEVERITY_LABELS[finding.severity] || "Low",
+      owaspLabel: finding.owaspLabel || OWASP_LABELS[finding.owasp] || finding.owasp || "Unmapped",
+      description: displayMeta.summary || finding.guide || finding.area || "",
+      remediation: displayMeta.remediation || finding.remediation || "",
+      confidence:
+        displayMeta.confidence ||
+        finding.confidenceLabel ||
+        getConfidenceLabel(finding.confidence || "medium"),
+      count: 0,
+      evidences: [],
+      checklist: [],
+      identifiedFindings: [],
+      attackExample: displayMeta.example || FINDING_ATTACK_EXAMPLES[categoryKey] || `Example: verify the ${finding.title} path with a reproducible payload`
+    };
+
+    bucket.count += 1;
+    if (getSeverityWeight(finding.severity) > getSeverityWeight(bucket.highestSeverity)) {
+      bucket.highestSeverity = finding.severity;
+      bucket.highestSeverityLabel = finding.severityLabel || SEVERITY_LABELS[finding.severity] || finding.severity;
+    }
+
+    if ((!bucket.description || bucket.description === finding.area) && finding.guide) {
+      bucket.description = displayMeta.summary || finding.guide;
+    }
+    if (!bucket.remediation && finding.remediation) {
+      bucket.remediation = displayMeta.remediation || finding.remediation;
+    }
+    if (!bucket.owaspLabel && finding.owaspLabel) {
+      bucket.owaspLabel = finding.owaspLabel;
+    }
+
+    if (finding.evidence) {
+      const trimmedEvidence = truncateText(finding.evidence, 220);
+      if (trimmedEvidence && !bucket.evidences.includes(trimmedEvidence)) {
+        bucket.evidences.push(trimmedEvidence);
+      }
+    }
+
+    if (finding.title && !bucket.identifiedFindings.includes(finding.title)) {
+      bucket.identifiedFindings.push(finding.title);
+    }
+
+    for (const item of finding.checklist || []) {
+      if (item && !bucket.checklist.includes(item)) {
+        bucket.checklist.push(item);
+      }
+    }
+
+    groups.set(categoryKey, bucket);
+  }
+
+  return [...groups.values()]
+    .map((bucket) => ({
+      ...bucket,
+      evidences: bucket.evidences.slice(0, 2),
+      checklist: bucket.checklist.slice(0, 3),
+      identifiedFindings: bucket.identifiedFindings,
+      description: truncateText(bucket.description, 320),
+      remediation: truncateText(bucket.remediation, 280)
+    }))
+    .sort(
+      (a, b) =>
+        getSeverityWeight(b.highestSeverity) - getSeverityWeight(a.highestSeverity) ||
+        b.count - a.count ||
+        a.title.localeCompare(b.title)
+    );
+}
+
+function getChecklistCategoryKey(findingKey) {
+  const key = String(findingKey || "");
+
+  if (key === "missing-nosniff") {
+    return "missing-x-content-type-options";
+  }
+  if (key === "server-banner-disclosure") {
+    return "server-version-disclosure";
+  }
+  if (key === "verbose-error-disclosure") {
+    return "stack-trace-disclosure";
+  }
+  if (key === "server-error-observed") {
+    return "5xx-observed";
+  }
+  if (key === "directory-listing") {
+    return "directory-indexing";
+  }
+  if (key === "js-secret-literal-exposure") {
+    return "js-secret-literal";
+  }
+
+  if (key.startsWith("cookie-missing-httponly-")) {
+    return "missing-httponly-cookie";
+  }
+  if (key.startsWith("cookie-missing-secure-")) {
+    return "missing-secure-cookie";
+  }
+  if (key.startsWith("cookie-missing-samesite-")) {
+    return "missing-samesite-cookie";
+  }
+  if (key.startsWith("cookie-samesite-none-without-secure-")) {
+    return "samesite-none-without-secure-cookie";
+  }
+  if (key.startsWith("cookie-")) {
+    return "auth";
+  }
+
+  return key;
 }
 
 function analyzeHarLocally(har) {
@@ -1180,6 +1568,11 @@ function analyzeSecurityFindings(exchange) {
   const requestContainsXss = XSS_REGEX.test(requestText);
   const reflectedXss = containsReflectedPayload(requestText, responseBody, XSS_REGEX);
   const requestContainsSqli = SQLI_REGEX.test(requestText);
+  const sqlErrorObserved = SQL_ERROR_DISCLOSURE_REGEX.test(responseBody);
+  const sqlmapCandidateParams = extractSqlmapCandidateParams(exchange);
+  const hasSqlmapCandidateParams = sqlmapCandidateParams.some((item) =>
+    ["query", "body", "json", "path"].includes(item.source)
+  );
   const requestContainsTraversal = PATH_TRAVERSAL_REGEX.test(requestText);
   const requestContainsCommand = COMMAND_INJECTION_REGEX.test(requestText);
   const requestContainsOpenRedirect = OPEN_REDIRECT_REGEX.test(requestText);
@@ -1875,6 +2268,55 @@ function analyzeSecurityFindings(exchange) {
     );
   }
 
+  if (sqlErrorObserved) {
+    findings.push(
+      buildFinding({
+        key: "sqli-error-disclosure",
+        title: "SQL 오류 메시지 노출로 Injection 가능성 의심",
+        severity: "high",
+        owasp: "A03",
+        area: "Response Body",
+        evidence: `응답 본문에서 DB/SQL 오류 패턴이 보입니다. Snippet: ${findSnippet(
+          responseBody,
+          SQL_ERROR_DISCLOSURE_REGEX
+        )}`,
+        guide:
+          "SQL 문법 오류나 DB 드라이버 예외가 응답에 직접 보이면 입력값이 쿼리 처리에 영향을 주고 있을 가능성이 있습니다. 항상 SQL Injection은 아니지만, 파라미터가 동적 쿼리에 들어가는 강한 신호입니다.",
+        remediation:
+          "운영 응답에서 DB 오류를 숨기고, 해당 엔드포인트의 쿼리 구성을 prepared statement/parameter binding 기준으로 점검하세요. SQLMap과 수동 검증으로 응답 차이와 오류 재현 여부를 함께 확인하는 편이 좋습니다.",
+        checklist: [
+          "같은 요청에서 작은 따옴표, 숫자/문자 경계값, 인코딩 변형 입력으로 응답 차이를 비교합니다.",
+          "서버 로그에서 실제 SQL 예외와 바인딩 실패 위치를 확인합니다.",
+          "해당 엔드포인트를 SQLMap 후보로 올려 GET/POST 파라미터를 각각 점검합니다."
+        ],
+        confidence: "high"
+      })
+    );
+  } else if (!requestContainsSqli && hasSqlmapCandidateParams && (isApiLikeExchange(exchange) || responseStatus >= 500)) {
+    findings.push(
+      buildFinding({
+        key: "sqli-review-candidate",
+        title: "SQL Injection 점검 권장 엔드포인트",
+        severity: responseStatus >= 500 ? "medium" : "low",
+        owasp: "A03",
+        area: "Request URL/Body",
+        evidence: `점검 가능한 파라미터가 있습니다. Params: ${
+          sqlmapCandidateParams.map((item) => `${item.source}:${item.name}`).join(", ") || "none"
+        }`,
+        guide:
+          "API 호출에서 쿼리/바디 파라미터가 식별되었고, 실제 서버 동작을 바꾸는 엔드포인트처럼 보입니다. 취약점 확정은 아니지만 SQLMap으로 자동 점검하기 좋은 후보입니다.",
+        remediation:
+          "이 엔드포인트를 SQLMap 후보로 올려 GET/POST/JSON 파라미터를 순차 점검하고, 서버 측에서는 ORM/raw query 구간이 파라미터 바인딩을 강제하는지 검토하세요.",
+        checklist: [
+          "식별된 파라미터 각각에 대해 응답 코드, 본문, 시간 차이를 비교합니다.",
+          "GET이면 query, POST/PUT/PATCH면 body/json 기준으로 SQLMap을 실행합니다.",
+          "로그인 세션이 필요한 엔드포인트라면 현재 세션 헤더/쿠키를 함께 넘겨 재검증합니다."
+        ],
+        confidence: responseStatus >= 500 ? "medium" : "low"
+      })
+    );
+  }
+
   if (requestContainsXss || reflectedXss || (isHtmlResponse && XSS_REGEX.test(responseBody))) {
     findings.push(
       buildFinding({
@@ -2398,6 +2840,31 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
   const summary = snapshot.summary || {};
   const aiSummaryRecord = snapshot.aiSummaryMeta || {};
   const aiSummaryText = snapshot.aiSummary || run.ai_summary || "";
+  const rawModalOwaspSummary = Array.isArray(snapshot.owaspSummary)
+    ? snapshot.owaspSummary
+    : Array.isArray(run.owasp_summary)
+      ? run.owasp_summary
+      : [];
+  const rawModalEndpointSummary = Array.isArray(snapshot.endpointSummary)
+    ? snapshot.endpointSummary
+    : Array.isArray(run.endpoint_summary)
+      ? run.endpoint_summary
+      : [];
+  const modalExchanges = getInspectionRunExchanges(run);
+  const modalOwaspSummary =
+    rawModalOwaspSummary.length > 0
+      ? rawModalOwaspSummary
+      : summarizeFindingsByOwasp(
+          modalExchanges.flatMap((exchange) =>
+            mergeSecurityFindings(
+              exchange.securityFindings,
+              analyzeSecurityFindings(exchange),
+              exchange
+            )
+          )
+        );
+  const modalEndpointSummary =
+    rawModalEndpointSummary.length > 0 ? rawModalEndpointSummary : summarizeEndpoints(modalExchanges).slice(0, 10);
   const conclusion = snapshot.conclusion || buildInspectionConclusion({
     totalFindings: run.total_findings,
     criticalFindings: run.critical_findings,
@@ -2449,24 +2916,32 @@ function InspectionRunModal({ run, onClose, onDownloadHtml, onDownloadPdf }) {
           <div className="recent-card inspection-modal-wide">
             <strong>OWASP Summary</strong>
             <div className="owasp-overview-chips">
-              {(run.owasp_summary || []).map((item) => (
-                <span key={`${run.id}-${item.key}`} className="owasp-chip">
-                  {item.label} ({item.count})
-                </span>
-              ))}
+              {modalOwaspSummary.length > 0 ? (
+                modalOwaspSummary.map((item) => (
+                  <span key={`${run.id}-${item.key}`} className="owasp-chip">
+                    {item.label} ({item.count})
+                  </span>
+                ))
+              ) : (
+                <span className="empty-copy">저장된 OWASP 요약이 없습니다.</span>
+              )}
             </div>
           </div>
           <div className="recent-card inspection-modal-wide">
             <strong>Endpoint Priority Snapshot</strong>
             <div className="endpoint-overview-list">
-              {(run.endpoint_summary || []).map((item) => (
-                <div key={`${run.id}-${item.endpoint}`} className="endpoint-card">
-                  <span className="endpoint-title">{item.endpoint}</span>
-                  <span>Score: {item.score}</span>
-                  <span>Findings: {item.findings}</span>
-                  <span>Highest: {item.highestSeverityLabel || item.highestSeverity}</span>
-                </div>
-              ))}
+              {modalEndpointSummary.length > 0 ? (
+                modalEndpointSummary.map((item) => (
+                  <div key={`${run.id}-${item.endpoint}`} className="endpoint-card">
+                    <span className="endpoint-title">{item.endpoint}</span>
+                    <span>Score: {item.score}</span>
+                    <span>Findings: {item.findings}</span>
+                    <span>Highest: {item.highestSeverityLabel || item.highestSeverity}</span>
+                  </div>
+                ))
+              ) : (
+                <span className="empty-copy">저장된 엔드포인트 우선순위 스냅샷이 없습니다.</span>
+              )}
             </div>
           </div>
           {summary && Object.keys(summary).length > 0 ? (
@@ -2607,12 +3082,34 @@ function MermaidModal({ code, onClose, onCopy }) {
   );
 }
 
+function NoticeModal({ title, message, onClose }) {
+  if (!message) {
+    return null;
+  }
+
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal-shell notice-modal-shell" onClick={(event) => event.stopPropagation()}>
+        <div className="notice-modal-body">
+          <strong>{title}</strong>
+          <p>{message}</p>
+          <button type="button" onClick={onClose}>
+            확인
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const appShellRef = useRef(null);
   const activeRef = useRef(false);
   const autoStoppedSessionRef = useRef("");
   const savedInspectionSessionRef = useRef("");
   const summarizedSessionRef = useRef("");
+  const loginFailurePopupKeyRef = useRef("");
+  const capturePayloadSignatureRef = useRef("");
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
@@ -2621,13 +3118,15 @@ export default function App() {
   const [activeSection, setActiveSection] = useState(() =>
     getStoredValue("http-analyzer-active-section", "overview")
   );
+  const [captureMode, setCaptureMode] = useState(() =>
+    getStoredValue("http-analyzer-capture-mode", "manual")
+  );
   const [domain, setDomain] = useState(() => getStoredValue("http-analyzer-domain"));
   const [excludeInput, setExcludeInput] = useState(() =>
     getStoredValue("http-analyzer-exclude-patterns")
   );
-  const [loginId, setLoginId] = useState("");
-  const [loginPassword, setLoginPassword] = useState("");
   const [sessionValue, setSessionValue] = useState("");
+  const [loginFailureModal, setLoginFailureModal] = useState("");
   const [securityOnly, setSecurityOnly] = useState(
     () => getStoredValue("http-analyzer-security-only") === "true"
   );
@@ -2696,6 +3195,7 @@ export default function App() {
   const [recentHarAnalyses, setRecentHarAnalyses] = useState([]);
   const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
   const [recentInspectionRuns, setRecentInspectionRuns] = useState([]);
+  const [recentCapturePage, setRecentCapturePage] = useState(1);
   const [recentLoading, setRecentLoading] = useState(false);
   const [backendHealth, setBackendHealth] = useState({
     checkedAt: "",
@@ -2822,6 +3322,13 @@ export default function App() {
     () => buildDomainHistoryRuns(mergedInspectionRuns),
     [mergedInspectionRuns]
   );
+  const recentCapturePageSize = 5;
+  const recentCapturePageCount = Math.max(1, Math.ceil(domainHistoryRuns.length / recentCapturePageSize));
+  const pagedDomainHistoryRuns = useMemo(() => {
+    const safePage = Math.min(recentCapturePage, recentCapturePageCount);
+    const startIndex = (safePage - 1) * recentCapturePageSize;
+    return domainHistoryRuns.slice(startIndex, startIndex + recentCapturePageSize);
+  }, [domainHistoryRuns, recentCapturePage, recentCapturePageCount]);
   const mergedCaptureEvents = useMemo(
     () =>
       [
@@ -3064,7 +3571,7 @@ export default function App() {
         const autoStopped =
           wasActive &&
           !nextActive &&
-          ["idle", "crawl-complete", "crawl-error"].includes(data.stopReason) &&
+          ["idle", "crawl-complete", "crawl-error", "browser-closed"].includes(data.stopReason) &&
           data.sessionId &&
           autoStoppedSessionRef.current !== data.sessionId;
 
@@ -3086,9 +3593,29 @@ export default function App() {
           sessionStatus: data.sessionStatus || "skipped",
           sessionError: data.sessionError || ""
         });
+        if (data.sessionValue) {
+          setSessionValue(data.sessionValue);
+        }
         if (nextActive || wasActive) {
-          setExchanges(data.exchanges || []);
-          setErrors((data.errors || []).filter((item) => !isAbortedErrorText(item?.errorText)));
+          const nextExchanges = Array.isArray(data.exchanges) ? data.exchanges : [];
+          const nextErrors = (Array.isArray(data.errors) ? data.errors : []).filter(
+            (item) => !isAbortedErrorText(item?.errorText)
+          );
+          const lastExchange = nextExchanges[nextExchanges.length - 1];
+          const lastError = nextErrors[nextErrors.length - 1];
+          const nextSignature = [
+            nextExchanges.length,
+            lastExchange?.id || "",
+            lastExchange?.response?.timestamp || "",
+            nextErrors.length,
+            lastError?.id || lastError?.timestamp || ""
+          ].join("::");
+
+          if (capturePayloadSignatureRef.current !== nextSignature) {
+            capturePayloadSignatureRef.current = nextSignature;
+            setExchanges(nextExchanges);
+            setErrors(nextErrors);
+          }
         }
 
         if (autoStopped) {
@@ -3098,10 +3625,12 @@ export default function App() {
               ? "크롤링이 완료되어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다."
               : data.stopReason === "crawl-error"
                 ? "크롤링 중 오류가 발생해 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다."
-                : "네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.";
+                : data.stopReason === "browser-closed"
+                  ? "캡처 브라우저가 닫혀 캡처가 종료되었습니다. Recent Data를 갱신했습니다."
+                  : "네트워크 활동이 없어 캡처가 자동 중지되었습니다. Recent Data를 갱신했습니다.";
           setStatusMessage(autoStopMessage);
 
-          if (["crawl-complete", "idle", "crawl-error"].includes(data.stopReason)) {
+          if (["crawl-complete", "idle", "crawl-error", "browser-closed"].includes(data.stopReason)) {
             const endedAt = data.stoppedAt || new Date().toISOString();
             const captureInput = {
               targetUrl: data.targetUrl,
@@ -3113,10 +3642,20 @@ export default function App() {
               startedAt: data.startedAt,
               endedAt
             });
-            await persistInspectionRunFromSnapshot(snapshot, captureInput, data.sessionId, {
+            const localRun = await persistInspectionRunFromSnapshot(snapshot, captureInput, data.sessionId, {
               startedAt: data.startedAt,
               endedAt
             });
+            const localEvents = buildLocalCaptureEventsFromExchanges(
+              captureInput.exchanges || [],
+              endedAt,
+              data.sessionId,
+              data.targetUrl
+            );
+            setLocalCaptureEvents((current) =>
+              [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 400)
+            );
+            await flushCaptureArtifactsToBackend(localRun, localEvents);
           }
 
           const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`).catch(() => null);
@@ -3129,7 +3668,7 @@ export default function App() {
             );
           }
 
-          if (["crawl-complete", "idle"].includes(data.stopReason)) {
+          if (["crawl-complete", "idle", "browser-closed"].includes(data.stopReason)) {
             await requestCaptureCompletionSummary(
               {
                 targetUrl: data.targetUrl,
@@ -3205,6 +3744,10 @@ export default function App() {
     }
 
     const syncLocalQueue = async () => {
+      if (activeRef.current) {
+        return;
+      }
+
       const pendingRuns = localInspectionRuns.filter((item) => item.pending_sync);
       const pendingEvents = localCaptureEvents.filter((item) => item.pending_sync);
       const pendingSummaries = localAiSummaries.filter((item) => item.pending_sync);
@@ -3304,6 +3847,10 @@ export default function App() {
   }, [domain]);
 
   useEffect(() => {
+    setStoredValue("http-analyzer-capture-mode", captureMode);
+  }, [captureMode]);
+
+  useEffect(() => {
     setStoredValue("http-analyzer-exclude-patterns", excludeInput);
   }, [excludeInput]);
 
@@ -3341,6 +3888,27 @@ export default function App() {
   useEffect(() => {
     setStoredValue(LOCAL_CAPTURE_EVENTS_KEY, JSON.stringify(localCaptureEvents));
   }, [localCaptureEvents]);
+
+  useEffect(() => {
+    if (!captureSessionId && !active && exchanges.length === 0 && errors.length === 0) {
+      setStoredValue(LOCAL_LIVE_CAPTURE_KEY, "");
+      return;
+    }
+
+    setStoredValue(
+      LOCAL_LIVE_CAPTURE_KEY,
+      JSON.stringify({
+        captureSessionId,
+        captureMode,
+        domain,
+        startedAt: captureStartedAt,
+        active,
+        exchanges,
+        errors,
+        updatedAt: new Date().toISOString()
+      })
+    );
+  }, [captureSessionId, captureMode, domain, captureStartedAt, active, exchanges, errors]);
 
   useEffect(() => {
     setStoredValue(LOCAL_AI_SUMMARIES_KEY, JSON.stringify(localAiSummaries));
@@ -3705,6 +4273,98 @@ export default function App() {
     return localRun;
   }
 
+  function buildLocalCaptureEventsFromExchanges(rawExchanges = [], endedAt, sessionId, targetUrl) {
+    return rawExchanges
+      .slice()
+      .reverse()
+      .slice(0, 250)
+      .map((exchange, index) => ({
+        id: `local-event-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+        created_at: exchange.timestamp || endedAt,
+        pending_sync: true,
+        capture_session_id: sessionId || null,
+        target_url: targetUrl || "unknown",
+        request_method: exchange.request?.method || "?",
+        request_url: exchange.request?.url || exchange.endpointKey || "",
+        request_resource_type: exchange.request?.resourceType || "-",
+        request_timestamp: exchange.timestamp || endedAt,
+        request_headers: exchange.request?.headers || {},
+        request_body: exchange.request?.postData || "",
+        response_status: exchange.response?.status || null,
+        response_status_text: exchange.response?.statusText || null,
+        response_timestamp: exchange.response?.timestamp || null,
+        response_url: exchange.response?.url || null,
+        response_headers: exchange.response?.headers || {},
+        response_body_preview: exchange.response?.bodyPreview || "",
+        error_text: "",
+        historySource: "local"
+      }))
+      .filter((item) => !isAbortedErrorText(item.error_text));
+  }
+
+  async function flushCaptureArtifactsToBackend(localRun, localEvents) {
+    if (!localRun) {
+      return;
+    }
+
+    const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        capture_session_id: localRun.capture_session_id ?? null,
+        target_url: localRun.target_url,
+        started_at: localRun.started_at ?? null,
+        ended_at: localRun.ended_at ?? null,
+        total_exchanges: localRun.total_exchanges ?? 0,
+        total_errors: localRun.total_errors ?? 0,
+        total_findings: localRun.total_findings ?? 0,
+        critical_findings: localRun.critical_findings ?? 0,
+        high_findings: localRun.high_findings ?? 0,
+        security_only: Boolean(localRun.security_only),
+        mask_sensitive: Boolean(localRun.mask_sensitive),
+        excluded_patterns: Array.isArray(localRun.excluded_patterns) ? localRun.excluded_patterns : [],
+        owasp_summary: Array.isArray(localRun.owasp_summary) ? localRun.owasp_summary : [],
+        endpoint_summary: Array.isArray(localRun.endpoint_summary) ? localRun.endpoint_summary : [],
+        report_snapshot: localRun.report_snapshot && typeof localRun.report_snapshot === "object" ? localRun.report_snapshot : {}
+      })
+    }).catch(() => null);
+
+    if (inspectionResponse?.ok) {
+      setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
+    }
+
+    if (Array.isArray(localEvents) && localEvents.length > 0) {
+      const eventsResponse = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          events: localEvents.map((item) => ({
+            capture_session_id: item.capture_session_id ?? null,
+            target_url: item.target_url ?? null,
+            request_timestamp: item.request_timestamp ?? item.created_at ?? null,
+            request_method: item.request_method ?? null,
+            request_url: item.request_url ?? null,
+            request_resource_type: item.request_resource_type ?? null,
+            request_headers: item.request_headers ?? {},
+            request_body: item.request_body ?? "",
+            response_timestamp: item.response_timestamp ?? null,
+            response_url: item.response_url ?? null,
+            response_status: item.response_status ?? null,
+            response_status_text: item.response_status_text ?? null,
+            response_headers: item.response_headers ?? {},
+            response_body_preview: item.response_body_preview ?? "",
+            error_text: item.error_text ?? null
+          }))
+        })
+      }).catch(() => null);
+
+      if (eventsResponse?.ok) {
+        const syncedIds = new Set(localEvents.map((item) => item.id));
+        setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
+      }
+    }
+  }
+
   async function runSqlmapScan(event) {
     event.preventDefault();
     setSqlmapLoading(true);
@@ -3894,6 +4554,11 @@ export default function App() {
     setSqlmapError("");
   }
 
+  function openSqlmapFromFinding(exchange) {
+    loadSqlmapFromExchange(exchange);
+    setActiveSection("sqlmap");
+  }
+
   async function startCapture(event) {
     event.preventDefault();
     if (readOnlyDeployment) {
@@ -3903,19 +4568,21 @@ export default function App() {
 
     setSubmitting(true);
     setStatusMessage("");
+    setLoginFailureModal("");
+    loginFailurePopupKeyRef.current = "";
 
     try {
+      if (!domain.trim()) {
+        throw new Error("Domain을 입력해주세요.");
+      }
+
+      if (captureMode === "session" && !sessionValue.trim()) {
+        throw new Error("세션 입력 모드에서는 Session 값을 입력해야 합니다.");
+      }
+
       const excludePatterns = excludeInput
         ? getCombinedExcludePatterns(excludeInput)
         : [...FIXED_EXCLUDE_PATTERNS];
-
-      const credentials =
-        !sessionValue.trim() && loginId.trim() && loginPassword
-          ? {
-              username: loginId.trim(),
-              password: loginPassword
-            }
-          : null;
 
       const response = await fetch(`${API_BASE_URL}/api/capture/start`, {
         method: "POST",
@@ -3923,8 +4590,8 @@ export default function App() {
         body: JSON.stringify({
           domain,
           excludePatterns,
-          credentials,
-          sessionValue: sessionValue.trim()
+          sessionValue: captureMode === "session" ? sessionValue.trim() : "",
+          captureMode
         })
       });
 
@@ -3952,10 +4619,14 @@ export default function App() {
         sessionStatus: result.sessionStatus || "skipped",
         sessionError: result.sessionError || ""
       });
+      if (result.sessionValue) {
+        setSessionValue(result.sessionValue);
+      }
       activeRef.current = true;
       autoStoppedSessionRef.current = "";
       savedInspectionSessionRef.current = "";
       summarizedSessionRef.current = "";
+      capturePayloadSignatureRef.current = "";
       setExchanges([]);
       setErrors([]);
     } catch (error) {
@@ -3997,32 +4668,12 @@ export default function App() {
         endpoint_summary: endpointSummary.slice(0, 10),
         report_snapshot: snapshot
       };
-      const localEvents = analyzedExchanges
-        .slice()
-        .reverse()
-        .slice(0, 20)
-        .map((exchange, index) => ({
-          id: `local-event-${Date.now()}-${index}`,
-          created_at: exchange.timestamp || endedAt,
-          pending_sync: true,
-          capture_session_id: captureSessionId || null,
-          target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
-          request_method: exchange.request?.method || "?",
-          request_url: exchange.request?.url || exchange.endpointKey || "",
-          request_resource_type: exchange.request?.resourceType || "-",
-          request_timestamp: exchange.timestamp || endedAt,
-          request_headers: exchange.request?.headers || {},
-          request_body: exchange.request?.postData || "",
-          response_status: exchange.response?.status || null,
-          response_status_text: exchange.response?.statusText || null,
-          response_timestamp: exchange.response?.timestamp || null,
-          response_url: exchange.response?.url || null,
-          response_headers: exchange.response?.headers || {},
-          response_body_preview: exchange.response?.bodyPreview || "",
-          error_text: "",
-          historySource: "local"
-        }))
-        .filter((item) => !isAbortedErrorText(item.error_text));
+      const localEvents = buildLocalCaptureEventsFromExchanges(
+        analyzedExchanges,
+        endedAt,
+        captureSessionId || null,
+        domain || getStoredValue("http-analyzer-domain") || "unknown"
+      );
 
       setLocalInspectionRuns((current) => [localRun, ...current]);
       setLocalCaptureEvents((current) =>
@@ -4030,35 +4681,8 @@ export default function App() {
       );
       setErrors((current) => current.filter((item) => !isAbortedErrorText(item.errorText)));
 
-      if (captureSessionId || domain) {
-        const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            capture_session_id: captureSessionId || null,
-            target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
-            started_at: captureStartedAt || null,
-            ended_at: endedAt,
-            total_exchanges: analyzedExchanges.length,
-            total_errors: errors.length,
-            total_findings: allSecurityFindings.length,
-            critical_findings: criticalAlerts.length,
-            high_findings: highAlerts.length,
-            security_only: securityOnly,
-            mask_sensitive: maskSensitive,
-            excluded_patterns: getCombinedExcludePatterns(excludeInput),
-            owasp_summary: owaspSummary,
-            endpoint_summary: endpointSummary.slice(0, 10),
-            report_snapshot: snapshot
-          })
-        }).catch(() => null);
-
-        if (inspectionResponse?.ok) {
-          setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
-        }
-      }
-
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
+      await flushCaptureArtifactsToBackend(localRun, localEvents);
       await requestCaptureCompletionSummary(
         {
           targetUrl: domain || getStoredValue("http-analyzer-domain") || "",
@@ -4071,6 +4695,7 @@ export default function App() {
       setStatusMessage("");
       setActive(false);
       activeRef.current = false;
+      capturePayloadSignatureRef.current = "";
       setCaptureSessionId("");
       setCaptureStartedAt("");
 
@@ -4884,6 +5509,10 @@ window.addEventListener("load", () => {
   const displayedFindingEntries = focusedFindingExchangeId
     ? findingEntries.filter(({ exchange }) => exchange.id === focusedFindingExchangeId)
     : findingEntries;
+  const checklistRows = useMemo(
+    () => buildChecklistRowsFromFindings(allSecurityFindings),
+    [allSecurityFindings]
+  );
   const capturedCount = visibleExchanges.length;
   const totalCapturedCount = analyzedExchanges.length;
   const captureErrorCount = visibleErrors.length;
@@ -4894,6 +5523,8 @@ window.addEventListener("load", () => {
       : "running"
     : captureMeta.stopReason === "crawl-complete"
       ? "complete"
+      : captureMeta.stopReason === "browser-closed"
+        ? "complete"
       : captureMeta.stopReason === "crawl-error"
         ? "error"
         : "idle";
@@ -4910,6 +5541,90 @@ window.addEventListener("load", () => {
       ? 100
       : 0;
 
+  const captureChecklistItems = [
+    {
+      key: "sqli",
+      title: "SQL Injection",
+      description:
+        "쿼리 문자열, 폼 바디, JSON payload, path 파라미터가 SQL 실행에 영향을 줄 수 있는지 점검합니다. 정상 입력과 공격 입력의 응답 본문, 상태 코드, 응답 시간 차이를 비교하고 prepared statement가 일관되게 적용되는지 확인합니다.",
+      example: "예: id=1' OR '1'='1, q=test' UNION SELECT NULL--, SLEEP(5)"
+    },
+    {
+      key: "xss",
+      title: "Cross-Site Scripting (XSS)",
+      description:
+        "신뢰할 수 없는 입력이 HTML, DOM, JavaScript, 템플릿에 컨텍스트별 인코딩 없이 반영되는지 확인합니다. innerHTML, document.write, eval 같은 위험 sink에 도달 가능한지와 CSP가 실제로 실행을 제한하는지도 함께 봅니다.",
+      example: "예: <script>alert(1)</script>, \"><img src=x onerror=alert(1)>"
+    },
+    {
+      key: "idor",
+      title: "IDOR / Authorization Bypass",
+      description:
+        "객체 ID, 계정 번호, 주문 번호, 문서 키만 바꿔도 다른 사용자의 데이터에 접근 가능한지 확인합니다. 서버가 클라이언트 식별자를 신뢰하지 않고 소유권 및 권한 검사를 수행하는지 검증합니다.",
+      example: "예: /api/orders/1001 -> /api/orders/1002 변경 시 다른 사용자의 주문이 반환되는지 확인"
+    },
+    {
+      key: "auth",
+      title: "Authentication / Session Management",
+      description:
+        "로그인, 로그아웃, 토큰 갱신, 쿠키 속성, 세션 무효화 동작을 점검합니다. 보호된 엔드포인트가 인증 없는 접근을 차단하는지, 로그아웃 후 활성 세션이나 토큰이 실제로 폐기되는지 확인합니다.",
+      example: "예: 로그아웃 후 기존 SESSIONID가 계속 동작하거나 /api/member/profile 이 무인증으로 응답"
+    },
+    {
+      key: "cors",
+      title: "CORS / Cross-Origin Policy",
+      description:
+        "교차 출처 접근이 신뢰된 Origin으로만 제한되는지, 인증된 cross-origin 응답 읽기가 가능한지 점검합니다. Origin 반사 동작, wildcard 규칙, preflight 응답, credential 사용 여부를 악성 Origin 기준으로 테스트합니다.",
+      example: "예: Origin: https://evil.example 이 반사되고 Access-Control-Allow-Credentials: true 가 함께 응답"
+    },
+    {
+      key: "path-traversal",
+      title: "Path Traversal / File Access",
+      description:
+        "파일명, 경로, 템플릿, 다운로드 파라미터가 의도된 디렉터리 경계를 벗어날 수 있는지 테스트합니다. 인코딩된 traversal payload, 슬래시 변형, 중첩 경로 입력을 포함해 민감 파일 읽기/덮어쓰기가 가능한지 확인합니다.",
+      example: "예: ../../etc/passwd, ..%2f..%2fapp.env"
+    },
+    {
+      key: "cmdi",
+      title: "Command Injection",
+      description:
+        "셸 명령이나 시스템 유틸리티를 호출하는 기능을 식별하고, 사용자 입력이 그 명령에 직접 이어붙는지 확인합니다. 구분자, 서브셸 문법, 환경변수 확장, 파일 기반 명령 인자가 임의 실행을 유발할 수 있는지 점검합니다.",
+      example: "예: 127.0.0.1; id, test && whoami"
+    },
+    {
+      key: "open-redirect",
+      title: "Open Redirect",
+      description:
+        "next, redirect, returnUrl, continue, destination 파라미터가 임의 외부 URL 이동을 허용하는지 점검합니다. 로그인, 로그아웃, 비밀번호 재설정, 결제 완료 흐름에서 악용 가능한지도 함께 확인합니다.",
+      example: "예: /login?next=https://evil.example/phish"
+    },
+    {
+      key: "secret",
+      title: "Sensitive Data Exposure",
+      description:
+        "URL, 요청 바디, 응답 payload, 헤더, JavaScript 번들 안에서 secret, 자격증명, 개인정보, 내부 엔드포인트, 환경 정보가 노출되는지 확인합니다. 이런 값이 브라우저 캐시, 로그, source map에도 남는지 함께 검토합니다.",
+      example: "예: access_token=..., Authorization: Bearer ..., source map에 내부 API 경로 노출"
+    }
+  ];
+  const fallbackChecklistRows = useMemo(
+    () =>
+      captureChecklistItems.map((item) => ({
+        key: item.key,
+        title: item.title,
+        highestSeverity: "medium",
+        highestSeverityLabel: "Medium",
+        owaspLabel: "Manual Review",
+        description: item.description,
+        remediation: "연관된 요청/응답 흐름을 수동으로 검증하고, 실제로 확인되면 관련 백엔드 로직이나 헤더 설정 수정 우선순위를 높이세요.",
+        confidence: "수동 검증이 필요한 기본 점검 항목",
+        count: 0,
+        evidences: ["아직 매핑된 captured finding은 없습니다. 새로 캡처한 트래픽에 대해 이 행을 기준으로 수동 점검하세요."],
+        checklist: [],
+        attackExample: item.example
+      })),
+    [captureChecklistItems]
+  );
+  const renderedChecklistRows = checklistRows.length > 0 ? checklistRows : fallbackChecklistRows;
   const navigationItems = [
     {
       key: "overview",
@@ -4924,6 +5639,16 @@ window.addEventListener("load", () => {
       label: "Capture",
       description: "실시간 캡처와 요청 목록",
       count: visibleExchanges.length
+    },
+    {
+      key: "checklist",
+      icon: "checklist",
+      label: "Vulnerability Checklist",
+      description: "One-row-per-vulnerability review board",
+      count:
+        allSecurityFindings.length > 0
+          ? new Set(allSecurityFindings.map((finding) => getChecklistCategoryKey(finding.key))).size
+          : captureChecklistItems.length
     },
     {
       key: "findings",
@@ -5000,6 +5725,10 @@ window.addEventListener("load", () => {
 
     return () => window.clearTimeout(timer);
   }, [activeSection, focusedFindingExchangeId, displayedFindingEntries.length]);
+
+  useEffect(() => {
+    setRecentCapturePage((current) => Math.min(current, recentCapturePageCount));
+  }, [recentCapturePageCount]);
 
   if (!authUser) {
     return <LoginScreen onLogin={handleLogin} />;
@@ -5095,10 +5824,6 @@ window.addEventListener("load", () => {
         <div className="content-shell">
           <section className="hero-card filter-shell">
             <div className="topbar">
-              <div className="workspace-search">
-                <span aria-hidden="true">⌕</span>
-                <input type="search" placeholder="Search sessions..." />
-              </div>
               <div className="topbar-badges">
                 <div className="login-user-copy">
                   {authUser.picture ? (
@@ -5160,7 +5885,27 @@ window.addEventListener("load", () => {
             {activeSection === "capture" ? (
               <div className="capture-control-panel">
                 <form className="capture-form filter-bar" onSubmit={startCapture}>
-                  <div className="capture-filter-row">
+                  <div className="capture-mode-row">
+                    <button
+                      type="button"
+                      className={captureMode === "manual" ? "capture-mode-chip active" : "capture-mode-chip"}
+                      onClick={() => setCaptureMode("manual")}
+                    >
+                      새창 수동 캡처
+                    </button>
+                    <button
+                      type="button"
+                      className={captureMode === "session" ? "capture-mode-chip active" : "capture-mode-chip"}
+                      onClick={() => setCaptureMode("session")}
+                    >
+                      세션 입력 캡처
+                    </button>
+                  </div>
+                  <div
+                    className={`capture-primary-row ${
+                      captureMode === "session" ? "capture-primary-row-session" : "capture-primary-row-manual"
+                    }`}
+                  >
                     <label className="field-label field-card">
                       <span>Domain:</span>
                       <input
@@ -5170,6 +5915,20 @@ window.addEventListener("load", () => {
                         onChange={(event) => setDomain(event.target.value)}
                       />
                     </label>
+                    {captureMode === "session" ? (
+                      <label className="field-label field-card session-field">
+                        <span>Session:</span>
+                        <input
+                          type="password"
+                          autoComplete="off"
+                          placeholder="세션 쿠키 값 입력 예: SESSIONID=...; token=..."
+                          value={sessionValue}
+                          onChange={(event) => setSessionValue(event.target.value)}
+                        />
+                      </label>
+                    ) : null}
+                  </div>
+                  <div className="capture-filter-row">
                     <label className="field-label field-card">
                       <span>Excluded:</span>
                       <input
@@ -5180,40 +5939,10 @@ window.addEventListener("load", () => {
                       />
                     </label>
                   </div>
-                  <div className="auth-fields">
-                    <label className="field-label field-card">
-                      <span>ID:</span>
-                      <input
-                        type="text"
-                        autoComplete="username"
-                        placeholder="로그인 ID 또는 이메일"
-                        value={loginId}
-                        onChange={(event) => setLoginId(event.target.value)}
-                      />
-                    </label>
-                    <label className="field-label field-card">
-                      <span>PW:</span>
-                      <input
-                        type="password"
-                        autoComplete="current-password"
-                        placeholder="비밀번호"
-                        value={loginPassword}
-                        onChange={(event) => setLoginPassword(event.target.value)}
-                      />
-                    </label>
-                    <label className="field-label field-card session-field">
-                      <span>Session:</span>
-                      <input
-                        type="password"
-                        autoComplete="off"
-                        placeholder="세션 쿠키 값 입력 예: SESSIONID=...; token=..."
-                        value={sessionValue}
-                        onChange={(event) => setSessionValue(event.target.value)}
-                      />
-                    </label>
-                  </div>
                   <p className="field-hint">
-                    이미지 요청은 항상 제외됩니다. ID/PW 또는 Session 중 하나를 입력하면 인증된 상태로 스캔합니다.
+                    {captureMode === "manual"
+                      ? "새창이 열리면 직접 로그인하거나 이동하세요. 로그인 후 발생하는 요청/응답을 그대로 캡처합니다."
+                      : "Session 값을 넣고 바로 인증된 상태로 스캔합니다. 이미지 요청은 항상 제외됩니다."}
                   </p>
                   <div className="action-row action-card">
                     <button type="submit" disabled={submitting || active}>
@@ -5303,6 +6032,7 @@ window.addEventListener("load", () => {
               activeSection === "recent" ||
               activeSection === "sqlmap" ||
               activeSection === "api-test" ||
+              activeSection === "checklist" ||
               activeSection === "settings" ? null : (
               <div className={`section-intro ${activeSection === "findings" ? "findings-intro" : ""}`}>
                 <h2 className="section-title">
@@ -5491,6 +6221,7 @@ window.addEventListener("load", () => {
                       <div key={item.key} className="stats-card stats-card-inline">
                         <strong>{item.label}</strong>
                         <div className="stats-inline-row">
+                          <span>도메인 {item.domainCount}개</span>
                           <span>점검 {item.runCount}회</span>
                           <span>요청 {item.totalExchanges}건</span>
                           <span>Finding {item.totalFindings}건</span>
@@ -5502,7 +6233,7 @@ window.addEventListener("load", () => {
                 <div className="recent-capture-panel section-panel">
                   <div className="recent-section-header">
                     <strong>Recent Capture Events</strong>
-                    <span>스캔한 도메인 목록만 표시합니다. 불러오기는 해당 도메인의 전체 스캔 이력을 복원합니다.</span>
+                    <span>스캔한 도메인 목록만 표시하며 페이지당 5개씩 보여줍니다. 불러오기는 해당 도메인의 전체 스캔 이력을 복원합니다.</span>
                   </div>
                   <div className="inspection-run-table">
                     {domainHistoryRuns.length === 0 ? (
@@ -5510,7 +6241,7 @@ window.addEventListener("load", () => {
                         {recentLoading ? "스캔한 도메인을 불러오는 중..." : "저장된 스캔 도메인이 없습니다."}
                       </span>
                     ) : (
-                      domainHistoryRuns.map((item) => {
+                      pagedDomainHistoryRuns.map((item) => {
                         const summaryRecord = getAiSummaryRecordForRun(item);
 
                         return (
@@ -5574,6 +6305,24 @@ window.addEventListener("load", () => {
                       })
                     )}
                   </div>
+                  {recentCapturePageCount > 1 ? (
+                    <div className="recent-pagination">
+                      {Array.from({ length: recentCapturePageCount }, (_value, index) => {
+                        const page = index + 1;
+
+                        return (
+                          <button
+                            key={`recent-capture-page-${page}`}
+                            type="button"
+                            className={recentCapturePage === page ? "active" : ""}
+                            onClick={() => setRecentCapturePage(page)}
+                          >
+                            {page}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : null}
                 </div>
               </article>
             </section>
@@ -5998,6 +6747,11 @@ window.addEventListener("load", () => {
                               <button type="button" onClick={() => injectPocIntoReplay(finding, exchange)}>
                                 PoC를 Replay에 주입
                               </button>
+                              {isSqlmapRelevantFinding(finding) ? (
+                                <button type="button" onClick={() => openSqlmapFromFinding(exchange)}>
+                                  SQLMap에서 열기
+                                </button>
+                              ) : null}
                               <button
                                 type="button"
                                 className="tooltip-button"
@@ -6227,6 +6981,85 @@ window.addEventListener("load", () => {
               </article>
             </section>
           ) : null}
+
+          {activeSection === "checklist" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel capture-checklist-panel">
+                <div className="capture-checklist-head">
+                  <strong>Vulnerability Checklist</strong>
+                  <span>
+                    {checklistRows.length > 0
+                      ? `현재 Findings를 기준으로 ${checklistRows.length}개의 취약점 유형을 묶어 표시합니다.`
+                      : "일반적인 웹 취약점 범주를 기준으로 수동 점검용 행을 표시합니다."}
+                  </span>
+                </div>
+                <div className="capture-checklist-rows">
+                  {renderedChecklistRows.map((item) => (
+                    <article key={item.key} className="capture-checklist-row">
+                      <div className="capture-checklist-row-head">
+                        <div className="capture-checklist-row-title">
+                          <strong>{item.title}</strong>
+                          <div className="capture-checklist-row-meta">
+                            <span className={`severity-chip severity-chip-${item.highestSeverity}`}>
+                              {item.highestSeverityLabel}
+                            </span>
+                            <span className="security-summary-pill">{item.owaspLabel}</span>
+                            <span className="security-summary-pill">
+                              {item.count > 0 ? `Finding ${item.count}건` : "수동 점검"}
+                            </span>
+                          </div>
+                        </div>
+                        <span className="capture-checklist-row-confidence">{item.confidence}</span>
+                      </div>
+                      <div className="capture-checklist-row-line">
+                        <div className="capture-checklist-row-cell cell-summary">
+                          <span className="capture-checklist-row-label">설명</span>
+                          <p>{item.description || "저장된 설명이 없습니다."}</p>
+                        </div>
+                        <div className="capture-checklist-row-cell cell-evidence">
+                          <span className="capture-checklist-row-label">근거</span>
+                          <ul>
+                            {((item.evidences || []).length > 0 ? item.evidences : ["저장된 근거가 없습니다."]).map((evidence) => (
+                              <li key={evidence}>{evidence}</li>
+                            ))}
+                          </ul>
+                        </div>
+                        <div className="capture-checklist-row-cell cell-example">
+                          <span className="capture-checklist-row-label">공격 예시</span>
+                          <code>{item.attackExample}</code>
+                        </div>
+                        <div className="capture-checklist-row-cell cell-remediation">
+                          <span className="capture-checklist-row-label">권장 조치</span>
+                          <p>{item.remediation || "동작을 재현한 뒤 관련 코드 또는 설정 수정 우선순위를 정리하세요."}</p>
+                        </div>
+                      </div>
+                      {(item.checklist || []).length > 0 ? (
+                        <div className="capture-checklist-row-footer">
+                          {(item.checklist || []).map((check) => (
+                            <span key={check} className="security-summary-pill">
+                              {check}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {(item.identifiedFindings || []).length > 0 ? (
+                        <div className="capture-checklist-row-identified">
+                          <span className="capture-checklist-row-label">식별된 Findings</span>
+                          <div className="capture-checklist-row-footer">
+                            {(item.identifiedFindings || []).map((title) => (
+                              <span key={title} className="security-summary-pill">
+                                {title}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              </article>
+            </section>
+          ) : null}
         </div>
       </div>
 
@@ -6249,6 +7082,11 @@ window.addEventListener("load", () => {
         code={captureMermaidModal}
         onClose={() => setCaptureMermaidModal("")}
         onCopy={copyCaptureMermaid}
+      />
+      <NoticeModal
+        title="로그인 실패"
+        message={loginFailureModal}
+        onClose={() => setLoginFailureModal("")}
       />
     </main>
   );
