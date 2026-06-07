@@ -1,8 +1,17 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { onAuthStateChanged } from "firebase/auth";
+import {
+  getFirebaseAuth,
+  isFirebaseClientReady,
+  loadRecentFromFirebaseClient,
+  saveCaptureEventsToFirebase,
+  saveInspectionRunToFirebase,
+  saveInspectionSummaryToFirebase,
+  signInWithGooglePopup,
+  signOutFirebaseUser
+} from "./firebaseClient";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
-const GOOGLE_CLIENT_ID =
-  "924920443826-k59m97pgabmdb42qv9cq63plmuuvvn7s.apps.googleusercontent.com";
 const AUTH_STORAGE_KEY = "http-analyzer-auth-user";
 const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
@@ -197,7 +206,7 @@ function isLocalRuntime() {
   return LOCAL_HOSTNAMES.has(window.location.hostname);
 }
 
-async function loadRecentFromSupabase() {
+async function loadRecentFromBackend() {
   if (!API_BASE_URL) {
     return {
       harAnalyses: [],
@@ -216,6 +225,81 @@ async function loadRecentFromSupabase() {
   }
 
   return response.json();
+}
+
+function dedupeRecentRows(rows, keyBuilder) {
+  const seen = new Set();
+  return rows.filter((row) => {
+    const key = keyBuilder(row);
+    if (seen.has(key)) {
+      return false;
+    }
+
+    seen.add(key);
+    return true;
+  });
+}
+
+function sortRecentRows(rows, valueSelector) {
+  return [...rows].sort((left, right) => {
+    const leftValue = Date.parse(String(valueSelector(left) || ""));
+    const rightValue = Date.parse(String(valueSelector(right) || ""));
+    return rightValue - leftValue;
+  });
+}
+
+async function loadRecentFromAllSources() {
+  const [backendData, firebaseData] = await Promise.all([
+    loadRecentFromBackend().catch(() => ({
+      harAnalyses: [],
+      captureEvents: [],
+      inspectionRuns: [],
+      dbBacked: false
+    })),
+    loadRecentFromFirebaseClient().catch(() => ({
+      harAnalyses: [],
+      captureEvents: [],
+      inspectionRuns: [],
+      dbBacked: false
+    }))
+  ]);
+
+  const harAnalyses = sortRecentRows(
+    dedupeRecentRows(
+      [...(backendData.harAnalyses || []), ...(firebaseData.harAnalyses || [])],
+      (item) => String(item.id || item.fingerprint || `${item.file_name || ""}:${item.created_at || ""}`)
+    ),
+    (item) => item.created_at
+  );
+  const captureEvents = sortRecentRows(
+    dedupeRecentRows(
+      [...(backendData.captureEvents || []), ...(firebaseData.captureEvents || [])],
+      (item) =>
+        String(
+          item.id ||
+            `${item.capture_session_id || ""}:${item.request_url || ""}:${item.request_timestamp || item.created_at || ""}`
+        )
+    ),
+    (item) => item.created_at || item.request_timestamp
+  );
+  const inspectionRuns = sortRecentRows(
+    dedupeRecentRows(
+      [...(backendData.inspectionRuns || []), ...(firebaseData.inspectionRuns || [])],
+      (item) =>
+        String(
+          item.id ||
+            `${item.capture_session_id || ""}:${item.target_url || ""}:${item.ended_at || item.created_at || ""}`
+        )
+    ),
+    (item) => item.created_at || item.ended_at
+  );
+
+  return {
+    harAnalyses,
+    captureEvents,
+    inspectionRuns,
+    dbBacked: Boolean(backendData.dbBacked || firebaseData.dbBacked)
+  };
 }
 
 function NavigationIcon({ name }) {
@@ -818,6 +902,15 @@ function buildDomainHistoryRuns(runs) {
   }
 
   return [...grouped.values()].sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a));
+}
+
+function getRunCompareKey(run) {
+  return [
+    run?.id || "",
+    run?.capture_session_id || "",
+    run?.target_url || run?.report_snapshot?.domain || "",
+    run?.ended_at || run?.created_at || run?.started_at || ""
+  ].join("::");
 }
 
 function buildSuppressionRule(scope, finding, exchange) {
@@ -2561,28 +2654,6 @@ function formatDateTime(value) {
   return date.toLocaleString("ko-KR");
 }
 
-function decodeJwtPayload(token) {
-  if (!token || typeof window === "undefined") {
-    return null;
-  }
-
-  try {
-    const [, payload] = token.split(".");
-    if (!payload) {
-      return null;
-    }
-
-    const normalized = payload.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = normalized.padEnd(Math.ceil(normalized.length / 4) * 4, "=");
-    const binary = window.atob(padded);
-    const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
-    const decoded = new TextDecoder("utf-8").decode(bytes);
-    return JSON.parse(decoded);
-  } catch {
-    return null;
-  }
-}
-
 function getStoredAuthUser() {
   const user = getStoredJson(AUTH_STORAGE_KEY);
   if (!user || typeof user !== "object") {
@@ -2638,118 +2709,45 @@ async function readJsonSafely(response) {
   }
 }
 
-function LoginScreen({ onLogin }) {
+function LoginScreen({ onGoogleLogin, onLocalDevLogin, firebaseReady, loginLoading }) {
   const [loginError, setLoginError] = useState("");
   const loginShellRef = useRef(null);
   const showLocalDevLogin = isLocalRuntime();
 
-  useEffect(() => {
-    let cancelled = false;
+  async function handleGoogleLogin() {
+    setLoginError("");
 
-    function renderGoogleButton() {
-      if (cancelled || typeof window === "undefined" || !window.google?.accounts?.id) {
-        return;
-      }
-
-      const buttonRoot = document.getElementById("google-login-button");
-      if (!buttonRoot) {
-        return;
-      }
-
-      buttonRoot.innerHTML = "";
-      window.google.accounts.id.initialize({
-        client_id: GOOGLE_CLIENT_ID,
-        callback: (response) => {
-          const payload = decodeJwtPayload(response?.credential);
-          if (!payload?.email) {
-            setLoginError("구글 로그인 응답을 해석하지 못했습니다.");
-            return;
-          }
-
-          if (String(payload.email).toLowerCase() !== ALLOWED_GOOGLE_EMAIL) {
-            setLoginError(`허용된 계정만 접속할 수 있습니다: ${ALLOWED_GOOGLE_EMAIL}`);
-            return;
-          }
-
-          setLoginError("");
-          onLogin({
-            id: payload.sub,
-            email: payload.email,
-            name: payload.name || payload.email,
-            picture: payload.picture || "",
-            credential: response.credential
-          });
-        }
-      });
-      window.google.accounts.id.renderButton(buttonRoot, {
-        theme: "outline",
-        size: "large",
-        shape: "pill",
-        text: "signin_with",
-        width: 320
-      });
-    }
-
-    if (window.google?.accounts?.id) {
-      renderGoogleButton();
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    const existingScript = document.querySelector('script[src="https://accounts.google.com/gsi/client"]');
-    if (existingScript) {
-      existingScript.addEventListener("load", renderGoogleButton);
-      existingScript.addEventListener("error", () =>
-        setLoginError("구글 로그인 스크립트를 불러오지 못했습니다.")
+    try {
+      await onGoogleLogin();
+    } catch (error) {
+      setLoginError(
+        error instanceof Error ? error.message : "Firebase Google 로그인에 실패했습니다."
       );
-
-      return () => {
-        cancelled = true;
-        existingScript.removeEventListener("load", renderGoogleButton);
-      };
     }
-
-    const script = document.createElement("script");
-    script.src = "https://accounts.google.com/gsi/client";
-    script.async = true;
-    script.defer = true;
-    script.onload = renderGoogleButton;
-    script.onerror = () => setLoginError("구글 로그인 스크립트를 불러오지 못했습니다.");
-    document.head.appendChild(script);
-
-    return () => {
-      cancelled = true;
-      script.onload = null;
-      script.onerror = null;
-    };
-  }, [onLogin]);
-
-  function handleLocalDevLogin() {
-    onLogin({
-      id: "local-dev",
-      email: ALLOWED_GOOGLE_EMAIL,
-      name: "Local Developer",
-      picture: "",
-      credential: "local-dev"
-    });
   }
 
   return (
     <main ref={loginShellRef} className="login-shell">
       <section className="login-card">
-        <p className="login-eyebrow">Google Sign-In</p>
+        <p className="login-eyebrow">Firebase Auth</p>
         <h1 className="page-title">HTTP Analyzer Login</h1>
         <p className="login-copy">
-          캡처와 HAR 분석 화면에 들어가기 전에 구글 계정으로 로그인하세요.
+          캡처와 HAR 분석 화면에 들어가기 전에 Firebase Google 로그인으로 접속하세요.
         </p>
         <p className="login-copy">
           허용된 계정: <strong>{ALLOWED_GOOGLE_EMAIL}</strong>
         </p>
         <div className="login-actions">
-          <div id="google-login-button" className="google-login-button" />
+          <button
+            type="button"
+            className="local-dev-login-button"
+            onClick={handleGoogleLogin}
+            disabled={!firebaseReady || loginLoading}
+          >
+            {!firebaseReady ? "Firebase 설정 필요" : loginLoading ? "로그인 중..." : "Google 로그인"}
+          </button>
           {showLocalDevLogin ? (
-            <button type="button" className="local-dev-login-button" onClick={handleLocalDevLogin}>
+            <button type="button" className="local-dev-login-button" onClick={onLocalDevLogin}>
               로컬 개발 로그인
             </button>
           ) : null}
@@ -3110,8 +3108,10 @@ export default function App() {
   const summarizedSessionRef = useRef("");
   const loginFailurePopupKeyRef = useRef("");
   const capturePayloadSignatureRef = useRef("");
+  const pdfFontPromiseRef = useRef(null);
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
+  const [authLoading, setAuthLoading] = useState(() => isFirebaseClientReady());
   const [sidebarCollapsed, setSidebarCollapsed] = useState(
     () => getStoredValue("http-analyzer-sidebar-collapsed") === "true"
   );
@@ -3196,6 +3196,9 @@ export default function App() {
   const [recentCaptureEvents, setRecentCaptureEvents] = useState([]);
   const [recentInspectionRuns, setRecentInspectionRuns] = useState([]);
   const [recentCapturePage, setRecentCapturePage] = useState(1);
+  const [compareDomainKey, setCompareDomainKey] = useState("");
+  const [compareBaselineKey, setCompareBaselineKey] = useState("");
+  const [compareCurrentKey, setCompareCurrentKey] = useState("");
   const [recentLoading, setRecentLoading] = useState(false);
   const [backendHealth, setBackendHealth] = useState({
     checkedAt: "",
@@ -3203,7 +3206,10 @@ export default function App() {
     ok: false,
     error: "",
     service: "",
-    supabaseConfigured: false,
+    databaseConfigured: false,
+    databaseProvider: "",
+    objectStorageConfigured: false,
+    objectStorageProvider: "",
     captureDisabled: null
   });
   const [captureMermaidModal, setCaptureMermaidModal] = useState("");
@@ -3329,6 +3335,49 @@ export default function App() {
     const startIndex = (safePage - 1) * recentCapturePageSize;
     return domainHistoryRuns.slice(startIndex, startIndex + recentCapturePageSize);
   }, [domainHistoryRuns, recentCapturePage, recentCapturePageCount]);
+  const selectedCompareDomain = useMemo(
+    () => domainHistoryRuns.find((item) => item.domainKey === compareDomainKey) || null,
+    [domainHistoryRuns, compareDomainKey]
+  );
+  const compareRuns = useMemo(
+    () => (selectedCompareDomain?.runs || []).slice().sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a)),
+    [selectedCompareDomain]
+  );
+
+  useEffect(() => {
+    if (domainHistoryRuns.length === 0) {
+      setCompareDomainKey("");
+      setCompareBaselineKey("");
+      setCompareCurrentKey("");
+      return;
+    }
+
+    if (!compareDomainKey || !domainHistoryRuns.some((item) => item.domainKey === compareDomainKey)) {
+      setCompareDomainKey(domainHistoryRuns[0].domainKey);
+    }
+  }, [domainHistoryRuns, compareDomainKey]);
+
+  useEffect(() => {
+    if (compareRuns.length === 0) {
+      setCompareBaselineKey("");
+      setCompareCurrentKey("");
+      return;
+    }
+
+    const currentExists = compareRuns.some((run) => getRunCompareKey(run) === compareCurrentKey);
+    const baselineExists = compareRuns.some((run) => getRunCompareKey(run) === compareBaselineKey);
+    const defaultCurrent = getRunCompareKey(compareRuns[0]);
+    const defaultBaseline = getRunCompareKey(compareRuns[1] || compareRuns[0]);
+
+    if (!currentExists) {
+      setCompareCurrentKey(defaultCurrent);
+    }
+
+    if (!baselineExists) {
+      setCompareBaselineKey(defaultBaseline);
+    }
+  }, [compareRuns, compareCurrentKey, compareBaselineKey]);
+
   const mergedCaptureEvents = useMemo(
     () =>
       [
@@ -3507,6 +3556,41 @@ export default function App() {
   }, [authUser]);
 
   useEffect(() => {
+    const firebaseAuth = getFirebaseAuth();
+    if (!firebaseAuth) {
+      setAuthUser((current) => (current?.credential === "firebase-auth" ? null : current));
+      setAuthLoading(false);
+      return undefined;
+    }
+
+    const unsubscribe = onAuthStateChanged(firebaseAuth, (user) => {
+      if (!user?.email) {
+        setAuthUser((current) => (current?.credential === "local-dev" ? current : null));
+        setAuthLoading(false);
+        return;
+      }
+
+      if (String(user.email).toLowerCase() !== ALLOWED_GOOGLE_EMAIL) {
+        void signOutFirebaseUser().catch(() => null);
+        setAuthUser(null);
+        setAuthLoading(false);
+        return;
+      }
+
+      setAuthUser({
+        id: user.uid,
+        email: user.email,
+        name: user.displayName || user.email,
+        picture: user.photoURL || "",
+        credential: "firebase-auth"
+      });
+      setAuthLoading(false);
+    });
+
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const checkBackendHealth = async () => {
@@ -3526,7 +3610,10 @@ export default function App() {
           ok: response.ok && Boolean(data.ok),
           error: response.ok ? "" : data?.error || `HTTP ${response.status}`,
           service: data?.service || "http-analyzer-api",
-          supabaseConfigured: Boolean(data?.supabaseConfigured),
+          databaseConfigured: Boolean(data?.databaseConfigured),
+          databaseProvider: data?.databaseProvider || "",
+          objectStorageConfigured: Boolean(data?.objectStorageConfigured),
+          objectStorageProvider: data?.objectStorageProvider || "",
           captureDisabled:
             typeof data?.captureDisabled === "boolean" ? data.captureDisabled : null
         });
@@ -3541,7 +3628,10 @@ export default function App() {
           ok: false,
           error: error instanceof Error ? error.message : "Backend health check failed",
           service: "",
-          supabaseConfigured: false,
+          databaseConfigured: false,
+          databaseProvider: "",
+          objectStorageConfigured: false,
+          objectStorageProvider: "",
           captureDisabled: null
         });
       }
@@ -3646,6 +3736,7 @@ export default function App() {
               startedAt: data.startedAt,
               endedAt
             });
+            void localRun;
             const localEvents = buildLocalCaptureEventsFromExchanges(
               captureInput.exchanges || [],
               endedAt,
@@ -3655,18 +3746,10 @@ export default function App() {
             setLocalCaptureEvents((current) =>
               [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 400)
             );
-            await flushCaptureArtifactsToBackend(localRun, localEvents);
+            void refreshRecentAnalysesOnce().catch(() => null);
           }
 
-          const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`).catch(() => null);
-          if (recentResponse?.ok) {
-            const recentData = await recentResponse.json();
-            setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
-            setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
-            setRecentInspectionRuns(
-              Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
-            );
-          }
+          await refreshRecentAnalysesOnce().catch(() => null);
 
           if (["crawl-complete", "idle", "browser-closed"].includes(data.stopReason)) {
             await requestCaptureCompletionSummary(
@@ -3709,19 +3792,7 @@ export default function App() {
     const loadRecentAnalyses = async () => {
       setRecentLoading(true);
       try {
-        const data = readOnlyDeployment
-          ? await loadRecentFromSupabase()
-          : await fetch(`${API_BASE_URL}/api/recent-analyses`).then(async (response) => {
-              if (!response.ok) {
-                return {
-                  harAnalyses: [],
-                  captureEvents: [],
-                  inspectionRuns: []
-                };
-              }
-
-              return response.json();
-            });
+        const data = await loadRecentFromAllSources();
 
         setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
         setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
@@ -3758,62 +3829,92 @@ export default function App() {
 
       try {
         for (const run of pendingRuns) {
-          const response = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              capture_session_id: run.capture_session_id ?? null,
-              target_url: run.target_url,
-              started_at: run.started_at ?? null,
-              ended_at: run.ended_at ?? null,
-              total_exchanges: run.total_exchanges ?? 0,
-              total_errors: run.total_errors ?? 0,
-              total_findings: run.total_findings ?? 0,
-              critical_findings: run.critical_findings ?? 0,
-              high_findings: run.high_findings ?? 0,
-              security_only: Boolean(run.security_only),
-              mask_sensitive: Boolean(run.mask_sensitive),
-              excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
-              owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
-              endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
-              report_snapshot:
-                run.report_snapshot && typeof run.report_snapshot === "object"
-                  ? run.report_snapshot
-                  : {}
-            })
-          });
+          const payload = {
+            capture_session_id: run.capture_session_id ?? null,
+            target_url: run.target_url,
+            started_at: run.started_at ?? null,
+            ended_at: run.ended_at ?? null,
+            total_exchanges: run.total_exchanges ?? 0,
+            total_errors: run.total_errors ?? 0,
+            total_findings: run.total_findings ?? 0,
+            critical_findings: run.critical_findings ?? 0,
+            high_findings: run.high_findings ?? 0,
+            security_only: Boolean(run.security_only),
+            mask_sensitive: Boolean(run.mask_sensitive),
+            excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
+            owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
+            endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
+            report_snapshot:
+              run.report_snapshot && typeof run.report_snapshot === "object"
+                ? run.report_snapshot
+                : {}
+          };
 
-          if (response.ok) {
+          let saved = false;
+
+          try {
+            const response = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            saved = response.ok;
+          } catch {
+            saved = false;
+          }
+
+          if (!saved && isFirebaseClientReady()) {
+            const firebaseResult = await saveInspectionRunToFirebase(payload).catch(() => ({ saved: false }));
+            saved = Boolean(firebaseResult?.saved);
+          }
+
+          if (saved) {
             setLocalInspectionRuns((current) => current.filter((item) => item.id !== run.id));
           }
         }
 
         if (pendingEvents.length > 0) {
-          const response = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              events: pendingEvents.map((item) => ({
-                capture_session_id: item.capture_session_id ?? null,
-                target_url: item.target_url ?? null,
-                request_timestamp: item.request_timestamp ?? item.created_at ?? null,
-                request_method: item.request_method ?? null,
-                request_url: item.request_url ?? null,
-                request_resource_type: item.request_resource_type ?? null,
-                request_headers: item.request_headers ?? {},
-                request_body: item.request_body ?? "",
-                response_timestamp: item.response_timestamp ?? null,
-                response_url: item.response_url ?? null,
-                response_status: item.response_status ?? null,
-                response_status_text: item.response_status_text ?? null,
-                response_headers: item.response_headers ?? {},
-                response_body_preview: item.response_body_preview ?? "",
-                error_text: item.error_text ?? null
-              }))
-            })
-          });
+          const payload = {
+            events: pendingEvents.map((item) => ({
+              capture_session_id: item.capture_session_id ?? null,
+              target_url: item.target_url ?? null,
+              request_timestamp: item.request_timestamp ?? item.created_at ?? null,
+              request_method: item.request_method ?? null,
+              request_url: item.request_url ?? null,
+              request_resource_type: item.request_resource_type ?? null,
+              request_headers: item.request_headers ?? {},
+              request_body: item.request_body ?? "",
+              response_timestamp: item.response_timestamp ?? null,
+              response_url: item.response_url ?? null,
+              response_status: item.response_status ?? null,
+              response_status_text: item.response_status_text ?? null,
+              response_headers: item.response_headers ?? {},
+              response_body_preview: item.response_body_preview ?? "",
+              error_text: item.error_text ?? null,
+              created_at: item.created_at ?? null,
+              id: item.id || ""
+            }))
+          };
 
-          if (response.ok) {
+          let saved = false;
+
+          try {
+            const response = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload)
+            });
+            saved = response.ok;
+          } catch {
+            saved = false;
+          }
+
+          if (!saved && isFirebaseClientReady()) {
+            const firebaseResult = await saveCaptureEventsToFirebase(payload.events).catch(() => ({ saved: false }));
+            saved = Boolean(firebaseResult?.saved);
+          }
+
+          if (saved) {
             const syncedIds = new Set(pendingEvents.map((item) => item.id));
             setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
           }
@@ -3945,19 +4046,7 @@ export default function App() {
   }, [sessionSuppressedFindings]);
 
   async function refreshRecentAnalysesOnce() {
-    const data = readOnlyDeployment
-      ? await loadRecentFromSupabase()
-      : await fetch(`${API_BASE_URL}/api/recent-analyses`).then(async (response) => {
-          if (!response.ok) {
-            return {
-              harAnalyses: [],
-              captureEvents: [],
-              inspectionRuns: []
-            };
-          }
-
-          return response.json();
-        });
+    const data = await loadRecentFromAllSources();
 
     setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
     setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
@@ -3969,27 +4058,41 @@ export default function App() {
       return false;
     }
 
-    const response = await fetch(`${API_BASE_URL}/api/inspection-runs/summary`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        capture_session_id: summaryRecord.sessionId || null,
-        target_url: summaryRecord.targetUrl || "",
-        summary: summaryRecord.summary,
-        summary_meta: {
-          id: summaryRecord.id,
-          sessionId: summaryRecord.sessionId || "",
-          targetUrl: summaryRecord.targetUrl || "",
-          createdAt: summaryRecord.createdAt || "",
-          source: summaryRecord.source || "",
-          model: summaryRecord.model || "",
-          totalExchanges: summaryRecord.totalExchanges || 0,
-          totalErrors: summaryRecord.totalErrors || 0
-        }
-      })
-    });
+    const payload = {
+      capture_session_id: summaryRecord.sessionId || null,
+      target_url: summaryRecord.targetUrl || "",
+      summary: summaryRecord.summary,
+      summary_meta: {
+        id: summaryRecord.id,
+        sessionId: summaryRecord.sessionId || "",
+        targetUrl: summaryRecord.targetUrl || "",
+        createdAt: summaryRecord.createdAt || "",
+        source: summaryRecord.source || "",
+        model: summaryRecord.model || "",
+        totalExchanges: summaryRecord.totalExchanges || 0,
+        totalErrors: summaryRecord.totalErrors || 0
+      }
+    };
 
-    if (!response.ok) {
+    let saved = false;
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/inspection-runs/summary`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      saved = response.ok;
+    } catch {
+      saved = false;
+    }
+
+    if (!saved && isFirebaseClientReady()) {
+      const result = await saveInspectionSummaryToFirebase(payload).catch(() => ({ saved: false }));
+      saved = Boolean(result?.saved);
+    }
+
+    if (!saved) {
       return false;
     }
 
@@ -4244,32 +4347,6 @@ export default function App() {
 
     setLocalInspectionRuns((current) => [localRun, ...current]);
 
-    const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        capture_session_id: localRun.capture_session_id,
-        target_url: localRun.target_url,
-        started_at: localRun.started_at,
-        ended_at: localRun.ended_at,
-        total_exchanges: localRun.total_exchanges,
-        total_errors: localRun.total_errors,
-        total_findings: localRun.total_findings,
-        critical_findings: localRun.critical_findings,
-        high_findings: localRun.high_findings,
-        security_only: localRun.security_only,
-        mask_sensitive: localRun.mask_sensitive,
-        excluded_patterns: localRun.excluded_patterns,
-        owasp_summary: localRun.owasp_summary,
-        endpoint_summary: localRun.endpoint_summary,
-        report_snapshot: snapshot
-      })
-    }).catch(() => null);
-
-    if (inspectionResponse?.ok) {
-      setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
-    }
-
     return localRun;
   }
 
@@ -4300,69 +4377,6 @@ export default function App() {
         historySource: "local"
       }))
       .filter((item) => !isAbortedErrorText(item.error_text));
-  }
-
-  async function flushCaptureArtifactsToBackend(localRun, localEvents) {
-    if (!localRun) {
-      return;
-    }
-
-    const inspectionResponse = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        capture_session_id: localRun.capture_session_id ?? null,
-        target_url: localRun.target_url,
-        started_at: localRun.started_at ?? null,
-        ended_at: localRun.ended_at ?? null,
-        total_exchanges: localRun.total_exchanges ?? 0,
-        total_errors: localRun.total_errors ?? 0,
-        total_findings: localRun.total_findings ?? 0,
-        critical_findings: localRun.critical_findings ?? 0,
-        high_findings: localRun.high_findings ?? 0,
-        security_only: Boolean(localRun.security_only),
-        mask_sensitive: Boolean(localRun.mask_sensitive),
-        excluded_patterns: Array.isArray(localRun.excluded_patterns) ? localRun.excluded_patterns : [],
-        owasp_summary: Array.isArray(localRun.owasp_summary) ? localRun.owasp_summary : [],
-        endpoint_summary: Array.isArray(localRun.endpoint_summary) ? localRun.endpoint_summary : [],
-        report_snapshot: localRun.report_snapshot && typeof localRun.report_snapshot === "object" ? localRun.report_snapshot : {}
-      })
-    }).catch(() => null);
-
-    if (inspectionResponse?.ok) {
-      setLocalInspectionRuns((current) => current.filter((item) => item.id !== localRun.id));
-    }
-
-    if (Array.isArray(localEvents) && localEvents.length > 0) {
-      const eventsResponse = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          events: localEvents.map((item) => ({
-            capture_session_id: item.capture_session_id ?? null,
-            target_url: item.target_url ?? null,
-            request_timestamp: item.request_timestamp ?? item.created_at ?? null,
-            request_method: item.request_method ?? null,
-            request_url: item.request_url ?? null,
-            request_resource_type: item.request_resource_type ?? null,
-            request_headers: item.request_headers ?? {},
-            request_body: item.request_body ?? "",
-            response_timestamp: item.response_timestamp ?? null,
-            response_url: item.response_url ?? null,
-            response_status: item.response_status ?? null,
-            response_status_text: item.response_status_text ?? null,
-            response_headers: item.response_headers ?? {},
-            response_body_preview: item.response_body_preview ?? "",
-            error_text: item.error_text ?? null
-          }))
-        })
-      }).catch(() => null);
-
-      if (eventsResponse?.ok) {
-        const syncedIds = new Set(localEvents.map((item) => item.id));
-        setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
-      }
-    }
   }
 
   async function runSqlmapScan(event) {
@@ -4602,7 +4616,11 @@ export default function App() {
 
       const result = data || {};
 
-      setStatusMessage("");
+      setStatusMessage(
+        backendHealth.databaseConfigured
+          ? ""
+          : "캡처 창을 열었습니다. 현재 DB가 연결되지 않아 결과는 localStorage에 임시 보관되며, Firebase 연결 후 자동 동기화됩니다."
+      );
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
       setCaptureMeta({
@@ -4682,7 +4700,6 @@ export default function App() {
       setErrors((current) => current.filter((item) => !isAbortedErrorText(item.errorText)));
 
       await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
-      await flushCaptureArtifactsToBackend(localRun, localEvents);
       await requestCaptureCompletionSummary(
         {
           targetUrl: domain || getStoredValue("http-analyzer-domain") || "",
@@ -4698,20 +4715,7 @@ export default function App() {
       capturePayloadSignatureRef.current = "";
       setCaptureSessionId("");
       setCaptureStartedAt("");
-
-      try {
-        const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`);
-        if (recentResponse.ok) {
-          const recentData = await recentResponse.json();
-          setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
-          setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
-          setRecentInspectionRuns(
-            Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
-          );
-        }
-      } catch {
-        return;
-      }
+      await refreshRecentAnalysesOnce().catch(() => null);
     } catch (error) {
       setStatusMessage(error.message);
     } finally {
@@ -4789,19 +4793,7 @@ export default function App() {
         setLocalHarHistory((current) => current.filter((item) => item.fingerprint !== fingerprint));
       }
 
-      try {
-        const recentResponse = await fetch(`${API_BASE_URL}/api/recent-analyses`);
-        if (recentResponse.ok) {
-          const recentData = await recentResponse.json();
-          setRecentHarAnalyses(Array.isArray(recentData.harAnalyses) ? recentData.harAnalyses : []);
-          setRecentCaptureEvents(Array.isArray(recentData.captureEvents) ? recentData.captureEvents : []);
-          setRecentInspectionRuns(
-            Array.isArray(recentData.inspectionRuns) ? recentData.inspectionRuns : []
-          );
-        }
-      } catch {
-        return;
-      }
+      await refreshRecentAnalysesOnce().catch(() => null);
     } catch (error) {
       setHarUploadError(error.message);
     } finally {
@@ -5130,25 +5122,152 @@ export default function App() {
     downloadTextFile(html, `http-analyzer-report-${Date.now()}.html`, "text/html;charset=utf-8");
   }
 
-  function downloadPdfReport(snapshot = buildInspectionSnapshot()) {
-    const html = buildHtmlReportDocument(snapshot, { forPrint: true });
-    const reportWindow = window.open("", "_blank", "noopener,noreferrer");
-
-    if (!reportWindow) {
-      setStatusMessage("팝업이 차단되어 PDF 리포트를 열 수 없습니다.");
+  async function ensurePdfFont(jsPDF) {
+    if (pdfFontPromiseRef.current) {
+      await pdfFontPromiseRef.current;
       return;
     }
 
-    reportWindow.document.open();
-    reportWindow.document.write(html.replace(
-      "</body>",
-      `<script>
-window.addEventListener("load", () => {
-  setTimeout(() => window.print(), 250);
-});
-</script></body>`
-    ));
-    reportWindow.document.close();
+    pdfFontPromiseRef.current = (async () => {
+      const response = await fetch(
+        "https://cdn.jsdelivr.net/gh/googlefonts/noto-cjk@main/Sans/TTF/Korean/NotoSansCJKkr-Regular.ttf"
+      );
+
+      if (!response.ok) {
+        throw new Error(`PDF font load failed: HTTP ${response.status}`);
+      }
+
+      const buffer = await response.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let binary = "";
+      const chunkSize = 0x8000;
+      for (let index = 0; index < bytes.length; index += chunkSize) {
+        const chunk = bytes.subarray(index, index + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+      const base64 = btoa(binary);
+
+      jsPDF.API.addFileToVFS("NotoSansKR-Regular.ttf", base64);
+      jsPDF.API.addFont("NotoSansKR-Regular.ttf", "NotoSansKR", "normal");
+    })();
+
+    await pdfFontPromiseRef.current;
+  }
+
+  async function downloadPdfReport(snapshot = buildInspectionSnapshot()) {
+    try {
+      const { jsPDF } = await import("jspdf");
+      await ensurePdfFont(jsPDF);
+      const report = new jsPDF({
+        orientation: "p",
+        unit: "pt",
+        format: "a4",
+        compress: true
+      });
+
+      const pageWidth = report.internal.pageSize.getWidth();
+      const pageHeight = report.internal.pageSize.getHeight();
+      const marginX = 40;
+      const topMargin = 44;
+      const bottomMargin = 44;
+      const contentWidth = pageWidth - marginX * 2;
+      const lineHeight = 16;
+      let cursorY = topMargin;
+
+      const reportExchanges = snapshot.exchanges ?? visibleExchanges;
+      const lines = [
+        "HTTP Analyzer Report",
+        "",
+        `Inspector: ${snapshot.inspector ?? authUser?.email ?? "-"}`,
+        `Exported At: ${formatDateTime(snapshot.exportedAt ?? new Date().toISOString())}`,
+        `Domain: ${snapshot.domain || "-"}`,
+        `Excluded: ${(snapshot.excluded || []).join(", ") || "-"}`,
+        `Security Check: ${snapshot.securityOnly ? "ON" : "OFF"}`,
+        `Mask Sensitive: ${snapshot.maskSensitive ? "ON" : "OFF"}`,
+        `Visible Pairs: ${reportExchanges.length}`,
+        `Conclusion: ${snapshot.conclusion || "-"}`,
+        "",
+        "OWASP Summary",
+        ...(snapshot.owaspSummary?.length
+          ? snapshot.owaspSummary.map((item) => `- ${item.label}: ${item.count}`)
+          : ["- No findings"]),
+        "",
+        "Endpoint Priority",
+        ...(snapshot.endpointSummary?.length
+          ? snapshot.endpointSummary
+              .slice(0, 10)
+              .map(
+                (item) =>
+                  `- ${item.endpoint} | score=${item.score} | findings=${item.findings} | highest=${item.highestSeverityLabel}`
+              )
+          : ["- No endpoint summary"])
+      ];
+
+      if (snapshot.aiSummary) {
+        lines.push("", "OpenAI Summary");
+        lines.push(...String(snapshot.aiSummary).split("\n"));
+      }
+
+      reportExchanges.forEach((exchange, index) => {
+        lines.push("", `Exchange #${index + 1}`);
+        lines.push(`Request: ${exchange.request?.method || "-"} ${exchange.request?.url || "-"}`);
+        lines.push(`Resource: ${exchange.request?.resourceType || "-"}`);
+        lines.push(`Captured At: ${exchange.timestamp || "-"}`);
+        lines.push("Request Headers:");
+        lines.push(prettyJson(exchange.request?.headers || {}));
+        lines.push("Request Body:");
+        lines.push(exchange.request?.postData || "(empty)");
+        lines.push(`Response: ${exchange.response?.status || "-"} ${exchange.response?.url || "(pending response)"}`);
+        lines.push("Response Headers:");
+        lines.push(prettyJson(exchange.response?.headers || {}));
+        lines.push("Response Body Preview:");
+        lines.push(exchange.response?.bodyPreview || "(binary, empty, or pending)");
+
+        if (Array.isArray(exchange.securityFindings) && exchange.securityFindings.length > 0) {
+          lines.push("Security Findings:");
+          exchange.securityFindings.forEach((finding) => {
+            lines.push(
+              `- [${finding.severityLabel}] ${finding.title} | ${finding.owaspLabel} | Evidence: ${finding.evidence}`
+            );
+          });
+        }
+      });
+
+      const normalizedLines = lines.flatMap((line) => {
+        if (line === "") {
+          return [""];
+        }
+
+        return report.splitTextToSize(String(line), contentWidth);
+      });
+
+      report.setFont("NotoSansKR", "normal");
+      report.setFontSize(11);
+
+      normalizedLines.forEach((line, index) => {
+        if (cursorY > pageHeight - bottomMargin) {
+          report.addPage();
+          cursorY = topMargin;
+        }
+
+        if (index === 0) {
+          report.setFontSize(18);
+          report.text(String(line), marginX, cursorY);
+          report.setFontSize(11);
+          cursorY += 24;
+          return;
+        }
+
+        report.text(String(line || " "), marginX, cursorY);
+        cursorY += line === "" ? 10 : lineHeight;
+      });
+
+      report.save(`http-analyzer-report-${Date.now()}.pdf`);
+    } catch (error) {
+      setStatusMessage(
+        error instanceof Error ? `PDF 리포트 생성에 실패했습니다: ${error.message}` : "PDF 리포트 생성에 실패했습니다."
+      );
+    }
   }
 
 
@@ -5320,15 +5439,51 @@ window.addEventListener("load", () => {
     }
   }
 
-  function handleLogin(user) {
-    setAuthUser(user);
+  async function handleGoogleLogin() {
+    if (!isFirebaseClientReady()) {
+      throw new Error("Firebase client 설정이 없어 로그인할 수 없습니다.");
+    }
+
+    setAuthLoading(true);
+
+    try {
+      const result = await signInWithGooglePopup();
+      const user = result?.user;
+
+      if (!user?.email) {
+        throw new Error("Firebase 사용자 정보를 가져오지 못했습니다.");
+      }
+
+      if (String(user.email).toLowerCase() !== ALLOWED_GOOGLE_EMAIL) {
+        await signOutFirebaseUser();
+        throw new Error(`허용된 계정만 접속할 수 있습니다: ${ALLOWED_GOOGLE_EMAIL}`);
+      }
+
+      setAuthUser({
+        id: user.uid,
+        email: user.email,
+        name: user.displayName || user.email,
+        picture: user.photoURL || "",
+        credential: "firebase-auth"
+      });
+    } finally {
+      setAuthLoading(false);
+    }
   }
 
-  function handleLogout() {
+  function handleLocalDevLogin() {
+    setAuthUser({
+      id: "local-dev",
+      email: ALLOWED_GOOGLE_EMAIL,
+      name: "Local Developer",
+      picture: "",
+      credential: "local-dev"
+    });
+  }
+
+  async function handleLogout() {
     setAuthUser(null);
-    if (typeof window !== "undefined" && window.google?.accounts?.id) {
-      window.google.accounts.id.disableAutoSelect();
-    }
+    await signOutFirebaseUser().catch(() => null);
   }
 
   function openInspectionRun(run) {
@@ -5502,6 +5657,184 @@ window.addEventListener("load", () => {
       aiSummaryMeta: summaryRecord
     };
   }
+
+  function openComparisonForRun(run) {
+    const domainKey = run.domainKey || getRunDomainKey(run);
+    const targetDomain = domainHistoryRuns.find((item) => item.domainKey === domainKey);
+    const sortedRuns = (targetDomain?.runs || []).slice().sort((a, b) => getRunTimeValue(b) - getRunTimeValue(a));
+
+    setCompareDomainKey(domainKey);
+    setCompareCurrentKey(getRunCompareKey(sortedRuns[0] || run));
+    setCompareBaselineKey(getRunCompareKey(sortedRuns[1] || sortedRuns[0] || run));
+    setActiveSection("compare");
+    setStatusMessage(
+      `${domainKey || "선택한 도메인"} 비교 메뉴를 열었습니다. 기준 점검과 비교 점검을 바꿔가며 변화량을 확인할 수 있습니다.`
+    );
+  }
+
+  const compareCurrentRun =
+    compareRuns.find((run) => getRunCompareKey(run) === compareCurrentKey) || compareRuns[0] || null;
+  const compareBaselineRun =
+    compareRuns.find((run) => getRunCompareKey(run) === compareBaselineKey) ||
+    compareRuns[1] ||
+    compareRuns[0] ||
+    null;
+
+  function buildRunComparisonPayload(run) {
+    if (!run) {
+      return {
+        exchanges: [],
+        findings: [],
+        endpointSummary: [],
+        owaspSummary: []
+      };
+    }
+
+    const exchanges = getInspectionRunExchanges(run).map((exchange) => ({
+      ...exchange,
+      securityFindings: mergeSecurityFindings(
+        exchange.securityFindings,
+        analyzeSecurityFindings(exchange),
+        exchange
+      )
+    }));
+    const findings = exchanges.flatMap((exchange) =>
+      (exchange.securityFindings || []).map((finding) => ({
+        ...finding,
+        endpoint: normalizeEndpoint(exchange.request?.url || exchange.response?.url),
+        signature: `${finding.key}::${normalizeEndpoint(exchange.request?.url || exchange.response?.url)}`
+      }))
+    );
+
+    return {
+      exchanges,
+      findings,
+      endpointSummary: summarizeEndpoints(exchanges),
+      owaspSummary: summarizeFindingsByOwasp(findings)
+    };
+  }
+
+  const compareCurrentPayload = useMemo(
+    () => buildRunComparisonPayload(compareCurrentRun),
+    [compareCurrentRun, mergedCaptureEvents, mergedInspectionRuns]
+  );
+  const compareBaselinePayload = useMemo(
+    () => buildRunComparisonPayload(compareBaselineRun),
+    [compareBaselineRun, mergedCaptureEvents, mergedInspectionRuns]
+  );
+
+  const compareSummary = useMemo(() => {
+    if (!compareCurrentRun || !compareBaselineRun) {
+      return null;
+    }
+
+    const metricRows = [
+      {
+        label: "Requests",
+        current: Number(compareCurrentRun.total_exchanges || compareCurrentPayload.exchanges.length || 0),
+        baseline: Number(compareBaselineRun.total_exchanges || compareBaselinePayload.exchanges.length || 0)
+      },
+      {
+        label: "Findings",
+        current: compareCurrentPayload.findings.length || Number(compareCurrentRun.total_findings || 0),
+        baseline: compareBaselinePayload.findings.length || Number(compareBaselineRun.total_findings || 0)
+      },
+      {
+        label: "Critical",
+        current:
+          compareCurrentPayload.findings.filter((item) => item.severity === "critical").length ||
+          Number(compareCurrentRun.critical_findings || 0),
+        baseline:
+          compareBaselinePayload.findings.filter((item) => item.severity === "critical").length ||
+          Number(compareBaselineRun.critical_findings || 0)
+      },
+      {
+        label: "High",
+        current:
+          compareCurrentPayload.findings.filter((item) => item.severity === "high").length ||
+          Number(compareCurrentRun.high_findings || 0),
+        baseline:
+          compareBaselinePayload.findings.filter((item) => item.severity === "high").length ||
+          Number(compareBaselineRun.high_findings || 0)
+      }
+    ].map((item) => ({
+      ...item,
+      delta: item.current - item.baseline
+    }));
+
+    const currentOwaspMap = new Map(compareCurrentPayload.owaspSummary.map((item) => [item.label, item.count]));
+    const baselineOwaspMap = new Map(compareBaselinePayload.owaspSummary.map((item) => [item.label, item.count]));
+    const owaspRows = [...new Set([...currentOwaspMap.keys(), ...baselineOwaspMap.keys()])]
+      .map((label) => ({
+        label,
+        current: currentOwaspMap.get(label) || 0,
+        baseline: baselineOwaspMap.get(label) || 0,
+        delta: (currentOwaspMap.get(label) || 0) - (baselineOwaspMap.get(label) || 0)
+      }))
+      .filter((item) => item.current > 0 || item.baseline > 0)
+      .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta) || b.current - b.baseline);
+
+    const currentEndpointMap = new Map(
+      compareCurrentPayload.endpointSummary.map((item) => [item.endpoint, item])
+    );
+    const baselineEndpointMap = new Map(
+      compareBaselinePayload.endpointSummary.map((item) => [item.endpoint, item])
+    );
+    const endpointRows = [...new Set([...currentEndpointMap.keys(), ...baselineEndpointMap.keys()])]
+      .map((endpoint) => {
+        const current = currentEndpointMap.get(endpoint);
+        const baseline = baselineEndpointMap.get(endpoint);
+        return {
+          endpoint,
+          currentRequests: current?.requests || 0,
+          baselineRequests: baseline?.requests || 0,
+          currentFindings: current?.findings || 0,
+          baselineFindings: baseline?.findings || 0,
+          deltaFindings: (current?.findings || 0) - (baseline?.findings || 0),
+          deltaRequests: (current?.requests || 0) - (baseline?.requests || 0),
+          currentSeverity: current?.highestSeverityLabel || "-",
+          baselineSeverity: baseline?.highestSeverityLabel || "-"
+        };
+      })
+      .filter(
+        (item) =>
+          item.currentRequests > 0 ||
+          item.baselineRequests > 0 ||
+          item.currentFindings > 0 ||
+          item.baselineFindings > 0
+      )
+      .sort(
+        (a, b) =>
+          Math.abs(b.deltaFindings) - Math.abs(a.deltaFindings) ||
+          Math.abs(b.deltaRequests) - Math.abs(a.deltaRequests) ||
+          a.endpoint.localeCompare(b.endpoint)
+      )
+      .slice(0, 12);
+
+    const currentFindingMap = new Map();
+    const baselineFindingMap = new Map();
+    for (const finding of compareCurrentPayload.findings) {
+      currentFindingMap.set(finding.signature, finding);
+    }
+    for (const finding of compareBaselinePayload.findings) {
+      baselineFindingMap.set(finding.signature, finding);
+    }
+
+    const newFindings = [...currentFindingMap.values()].filter(
+      (item) => !baselineFindingMap.has(item.signature)
+    );
+    const resolvedFindings = [...baselineFindingMap.values()].filter(
+      (item) => !currentFindingMap.has(item.signature)
+    );
+
+    return {
+      metricRows,
+      owaspRows,
+      endpointRows,
+      newFindings: newFindings.slice(0, 12),
+      resolvedFindings: resolvedFindings.slice(0, 12)
+    };
+  }, [compareCurrentRun, compareBaselineRun, compareCurrentPayload, compareBaselinePayload]);
 
   const findingEntries = visibleExchanges.flatMap((exchange) =>
     (exchange.securityFindings || []).map((finding) => ({ exchange, finding }))
@@ -5757,6 +6090,13 @@ window.addEventListener("load", () => {
       count: domainHistoryRuns.length
     },
     {
+      key: "compare",
+      icon: "recent",
+      label: "Compare Runs",
+      description: "동일 사이트 점검 이력 비교",
+      count: compareRuns.length
+    },
+    {
       key: "sqlmap",
       icon: "sqlmap",
       label: "SQLMap",
@@ -5816,7 +6156,14 @@ window.addEventListener("load", () => {
   }, [recentCapturePageCount]);
 
   if (!authUser) {
-    return <LoginScreen onLogin={handleLogin} />;
+    return (
+      <LoginScreen
+        onGoogleLogin={handleGoogleLogin}
+        onLocalDevLogin={handleLocalDevLogin}
+        firebaseReady={isFirebaseClientReady()}
+        loginLoading={authLoading}
+      />
+    );
   }
 
   return (
@@ -5894,7 +6241,18 @@ window.addEventListener("load", () => {
                     ? "disabled"
                     : "enabled"}
               </span>
-              <span>DB: {backendHealth.supabaseConfigured ? "connected" : "not set"}</span>
+              <span>
+                DB:{" "}
+                {backendHealth.databaseConfigured
+                  ? backendHealth.databaseProvider || "connected"
+                  : "not set"}
+              </span>
+              <span>
+                Files:{" "}
+                {backendHealth.objectStorageConfigured
+                  ? backendHealth.objectStorageProvider || "connected"
+                  : "not set"}
+              </span>
               <span>
                 Last:{" "}
                 {backendHealth.checkedAt
@@ -6115,6 +6473,7 @@ window.addEventListener("load", () => {
               activeSection === "findings" ||
               activeSection === "har" ||
               activeSection === "recent" ||
+              activeSection === "compare" ||
               activeSection === "sqlmap" ||
               activeSection === "api-test" ||
               activeSection === "checklist" ||
@@ -6288,7 +6647,7 @@ window.addEventListener("load", () => {
                         <span>
                           저장 상태:{" "}
                           {harUploadResult.storage?.saved
-                            ? "Supabase 저장 완료"
+                            ? "DB 저장 완료"
                             : harUploadResult.storage?.reason || "로컬 분석 결과"}
                         </span>
                         <span>총 요청: {harUploadResult.summary?.totalEntries ?? 0}</span>
@@ -6335,9 +6694,9 @@ window.addEventListener("load", () => {
                           <span>
                             저장 상태:{" "}
                             {selectedHarHistory.historySource === "db"
-                              ? "Supabase 저장 완료"
+                              ? "DB 저장 완료"
                               : harUploadResult?.storage?.saved
-                              ? "Supabase 저장 완료"
+                              ? "DB 저장 완료"
                               : harUploadResult?.storage?.reason || "로컬 분석 결과"}
                           </span>
                           <span>총 요청: {selectedHarHistory.summary?.totalEntries ?? 0}</span>
@@ -6425,6 +6784,13 @@ window.addEventListener("load", () => {
                                 </button>
                                 <button
                                   type="button"
+                                  disabled={!item.scanCount || item.scanCount < 2}
+                                  onClick={() => openComparisonForRun(item)}
+                                >
+                                  비교
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => downloadHtmlReport(getInspectionReportSnapshot(item))}
                                 >
                                   html 다운로드
@@ -6468,6 +6834,190 @@ window.addEventListener("load", () => {
                       })}
                     </div>
                   ) : null}
+                </div>
+              </article>
+            </section>
+          ) : null}
+
+          {activeSection === "compare" ? (
+            <section className="pair-list">
+              <article className="panel stacked-panel">
+                <div className="tool-panel section-panel compare-panel">
+                  <div className="compare-panel-head">
+                    <div>
+                      <strong>Compare Runs</strong>
+                      <p className="tool-copy">
+                        같은 도메인을 여러 번 점검했을 때 요청 수, finding, OWASP 분포, 엔드포인트 우선순위 변화량을 비교합니다.
+                      </p>
+                    </div>
+                    <div className="compare-panel-meta">
+                      <span>{selectedCompareDomain?.domainKey || "-"}</span>
+                      <span>{compareRuns.length} scans</span>
+                    </div>
+                  </div>
+                  <div className="compare-selector-grid">
+                    <label className="field-label field-card">
+                      <span>Domain</span>
+                      <select
+                        value={compareDomainKey}
+                        onChange={(event) => setCompareDomainKey(event.target.value)}
+                      >
+                        {domainHistoryRuns.map((item) => (
+                          <option key={`compare-domain-${item.domainKey}`} value={item.domainKey}>
+                            {item.domainKey} ({item.scanCount || 1}회)
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field-label field-card">
+                      <span>Baseline Run</span>
+                      <select
+                        value={compareBaselineKey}
+                        onChange={(event) => setCompareBaselineKey(event.target.value)}
+                      >
+                        {compareRuns.map((run) => (
+                          <option key={`baseline-${getRunCompareKey(run)}`} value={getRunCompareKey(run)}>
+                            {formatDateTime(run.ended_at || run.created_at)} · 요청 {run.total_exchanges || 0}건 · Finding{" "}
+                            {run.total_findings || 0}건
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field-label field-card">
+                      <span>Current Run</span>
+                      <select
+                        value={compareCurrentKey}
+                        onChange={(event) => setCompareCurrentKey(event.target.value)}
+                      >
+                        {compareRuns.map((run) => (
+                          <option key={`current-${getRunCompareKey(run)}`} value={getRunCompareKey(run)}>
+                            {formatDateTime(run.ended_at || run.created_at)} · 요청 {run.total_exchanges || 0}건 · Finding{" "}
+                            {run.total_findings || 0}건
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {!selectedCompareDomain ? (
+                    <div className="empty-state-card">비교할 점검 이력이 아직 없습니다.</div>
+                  ) : compareRuns.length < 2 ? (
+                    <div className="empty-state-card">
+                      {selectedCompareDomain.domainKey} 도메인은 아직 2회 이상 점검 이력이 없어 비교할 수 없습니다.
+                    </div>
+                  ) : !compareCurrentRun || !compareBaselineRun ? (
+                    <div className="empty-state-card">비교할 기준 점검과 현재 점검을 선택하세요.</div>
+                  ) : (
+                    <div className="compare-results">
+                      <div className="compare-run-head-grid">
+                        <div className="compare-run-head-card">
+                          <span>Baseline</span>
+                          <strong>{formatDateTime(compareBaselineRun.ended_at || compareBaselineRun.created_at)}</strong>
+                          <small>세션 {compareBaselineRun.capture_session_id || "-"}</small>
+                        </div>
+                        <div className="compare-run-head-card emphasis">
+                          <span>Current</span>
+                          <strong>{formatDateTime(compareCurrentRun.ended_at || compareCurrentRun.created_at)}</strong>
+                          <small>세션 {compareCurrentRun.capture_session_id || "-"}</small>
+                        </div>
+                      </div>
+
+                      <div className="compare-metric-grid">
+                        {compareSummary?.metricRows.map((item) => (
+                          <div key={`compare-metric-${item.label}`} className="compare-metric-card">
+                            <span>{item.label}</span>
+                            <strong>{item.current}</strong>
+                            <small>
+                              기준 {item.baseline} ·{" "}
+                              <em className={item.delta > 0 ? "delta-up" : item.delta < 0 ? "delta-down" : "delta-flat"}>
+                                {item.delta > 0 ? `+${item.delta}` : item.delta}
+                              </em>
+                            </small>
+                          </div>
+                        ))}
+                      </div>
+
+                      <div className="compare-detail-grid">
+                        <section className="compare-detail-card">
+                          <strong>OWASP Delta</strong>
+                          {compareSummary?.owaspRows.length ? (
+                            <div className="compare-list-table">
+                              {compareSummary.owaspRows.map((item) => (
+                                <div key={`owasp-delta-${item.label}`} className="compare-list-row">
+                                  <span>{item.label}</span>
+                                  <span>기준 {item.baseline}</span>
+                                  <span>현재 {item.current}</span>
+                                  <span className={item.delta > 0 ? "delta-up" : item.delta < 0 ? "delta-down" : "delta-flat"}>
+                                    {item.delta > 0 ? `+${item.delta}` : item.delta}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="empty-copy">OWASP 변화가 없습니다.</span>
+                          )}
+                        </section>
+
+                        <section className="compare-detail-card">
+                          <strong>Endpoint Delta</strong>
+                          {compareSummary?.endpointRows.length ? (
+                            <div className="compare-list-table">
+                              {compareSummary.endpointRows.map((item) => (
+                                <div key={`endpoint-delta-${item.endpoint}`} className="compare-list-row compare-list-row-wide">
+                                  <span>{item.endpoint}</span>
+                                  <span>Finding {item.baselineFindings} → {item.currentFindings}</span>
+                                  <span>Request {item.baselineRequests} → {item.currentRequests}</span>
+                                  <span className={item.deltaFindings > 0 ? "delta-up" : item.deltaFindings < 0 ? "delta-down" : "delta-flat"}>
+                                    {item.deltaFindings > 0 ? `+${item.deltaFindings}` : item.deltaFindings}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="empty-copy">엔드포인트 변화가 없습니다.</span>
+                          )}
+                        </section>
+                      </div>
+
+                      <div className="compare-detail-grid">
+                        <section className="compare-detail-card">
+                          <strong>New Findings</strong>
+                          {compareSummary?.newFindings.length ? (
+                            <div className="compare-list-table">
+                              {compareSummary.newFindings.map((item, index) => (
+                                <div key={`new-finding-${item.signature}-${index}`} className="compare-list-row compare-list-row-wide">
+                                  <span>{item.title}</span>
+                                  <span>{item.endpoint}</span>
+                                  <span>{item.owaspLabel}</span>
+                                  <span className={`severity-inline severity-${item.severity}`}>{item.severityLabel}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="empty-copy">새로 추가된 finding이 없습니다.</span>
+                          )}
+                        </section>
+
+                        <section className="compare-detail-card">
+                          <strong>Resolved Findings</strong>
+                          {compareSummary?.resolvedFindings.length ? (
+                            <div className="compare-list-table">
+                              {compareSummary.resolvedFindings.map((item, index) => (
+                                <div key={`resolved-finding-${item.signature}-${index}`} className="compare-list-row compare-list-row-wide">
+                                  <span>{item.title}</span>
+                                  <span>{item.endpoint}</span>
+                                  <span>{item.owaspLabel}</span>
+                                  <span className={`severity-inline severity-${item.severity}`}>{item.severityLabel}</span>
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <span className="empty-copy">해결된 finding이 없습니다.</span>
+                          )}
+                        </section>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </article>
             </section>

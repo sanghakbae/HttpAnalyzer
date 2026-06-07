@@ -12,10 +12,13 @@
     "start": "node server/index.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.49.8",
+    "@aws-sdk/client-s3": "^3.1063.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "firebase": "^12.14.0",
+    "firebase-admin": "^13.10.0",
+    "jspdf": "^4.2.1",
     "mermaid": "^11.14.0",
     "multer": "^1.4.5-lts.1",
     "playwright": "^1.52.0",

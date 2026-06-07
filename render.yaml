@@ -31,7 +31,15 @@ services:
         value: "3000"
       - key: DISABLE_SQLMAP
         value: "true"
-      - key: SUPABASE_URL
+      - key: FIREBASE_SERVICE_ACCOUNT_JSON
         sync: false
-      - key: SUPABASE_SERVICE_ROLE_KEY
+      - key: CLOUDFLARE_R2_ACCOUNT_ID
+        sync: false
+      - key: CLOUDFLARE_R2_ACCESS_KEY_ID
+        sync: false
+      - key: CLOUDFLARE_R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: CLOUDFLARE_R2_BUCKET
+        sync: false
+      - key: CLOUDFLARE_R2_PUBLIC_BASE_URL
         sync: false

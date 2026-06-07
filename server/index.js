@@ -6,7 +6,9 @@ import express from "express";
 import fs from "fs/promises";
 import multer from "multer";
 import path from "path";
-import { createClient } from "@supabase/supabase-js";
+import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { cert, getApps, initializeApp } from "firebase-admin/app";
+import { getFirestore } from "firebase-admin/firestore";
 import { chromium } from "playwright";
 import { fileURLToPath } from "url";
 import { promisify } from "util";
@@ -18,15 +20,23 @@ const upload = multer({ storage: multer.memoryStorage() });
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const proxyRulesPath = path.resolve(__dirname, "../proxy/rules.json");
-const localDataDir = path.resolve(__dirname, "../.local-data");
-const localInspectionRunsPath = path.resolve(localDataDir, "inspection-runs.json");
 const execFileAsync = promisify(execFile);
 
 app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY;
+const r2AccountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID;
+const r2AccessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
+const r2SecretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
+const r2Bucket = process.env.CLOUDFLARE_R2_BUCKET;
+const r2PublicBaseUrl = process.env.CLOUDFLARE_R2_PUBLIC_BASE_URL;
+const r2Endpoint =
+  process.env.CLOUDFLARE_R2_ENDPOINT ||
+  (r2AccountId ? `https://${r2AccountId}.r2.cloudflarestorage.com` : "");
 const disableCapture = process.env.DISABLE_CAPTURE === "true";
 const playwrightHeadless =
   process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
@@ -38,11 +48,59 @@ const captureCrawlPageDelayMs = Number(process.env.CAPTURE_CRAWL_PAGE_DELAY_MS |
 const captureLoginWaitMs = Number(process.env.CAPTURE_LOGIN_WAIT_MS || 3000);
 const sqlmapBin = process.env.SQLMAP_BIN || "sqlmap";
 const disableSqlmap = process.env.DISABLE_SQLMAP === "true" || Boolean(process.env.RENDER);
-const supabase =
-  supabaseUrl && supabaseServiceRoleKey
-    ? createClient(supabaseUrl, supabaseServiceRoleKey, {
-        auth: {
-          persistSession: false
+
+function buildFirebaseCredential() {
+  if (firebaseServiceAccountJson) {
+    const parsed = JSON.parse(firebaseServiceAccountJson);
+    return cert({
+      projectId: parsed.project_id,
+      clientEmail: parsed.client_email,
+      privateKey: String(parsed.private_key || "").replace(/\\n/g, "\n")
+    });
+  }
+
+  if (firebaseProjectId && firebaseClientEmail && firebasePrivateKey) {
+    return cert({
+      projectId: firebaseProjectId,
+      clientEmail: firebaseClientEmail,
+      privateKey: String(firebasePrivateKey).replace(/\\n/g, "\n")
+    });
+  }
+
+  return null;
+}
+
+function initializeFirebase() {
+  try {
+    const credential = buildFirebaseCredential();
+    if (!credential) {
+      return null;
+    }
+
+    if (getApps().length > 0) {
+      return getApps()[0];
+    }
+
+    return initializeApp({ credential });
+  } catch (error) {
+    console.warn(
+      "Firebase initialization failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return null;
+  }
+}
+
+const firebaseApp = initializeFirebase();
+const firestore = firebaseApp ? getFirestore(firebaseApp) : null;
+const r2Client =
+  r2Endpoint && r2AccessKeyId && r2SecretAccessKey
+    ? new S3Client({
+        region: "auto",
+        endpoint: r2Endpoint,
+        credentials: {
+          accessKeyId: r2AccessKeyId,
+          secretAccessKey: r2SecretAccessKey
         }
       })
     : null;
@@ -82,61 +140,72 @@ const captureState = {
 
 const attachedCapturePages = new WeakSet();
 const memoryRecentCaptureEvents = [];
+const firestoreCollectionNames = {
+  harAnalyses: "capture_har_analyses",
+  captureEvents: "capture_http_events",
+  inspectionRuns: "capture_inspection_runs"
+};
 
-async function readJsonFile(filePath, fallback) {
-  try {
-    const raw = await fs.readFile(filePath, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
+function sortByIsoDesc(rows, getValue) {
+  return [...rows].sort((left, right) => {
+    const leftValue = Date.parse(getValue(left) || "");
+    const rightValue = Date.parse(getValue(right) || "");
+    return rightValue - leftValue;
+  });
+}
+
+function buildRecordId(prefix) {
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeFileName(value) {
+  return String(value || "file")
+    .replace(/[^a-zA-Z0-9._-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 160);
+}
+
+function buildR2ObjectUrl(key) {
+  if (!key || !r2PublicBaseUrl) {
+    return "";
   }
+
+  return `${r2PublicBaseUrl.replace(/\/$/, "")}/${key}`;
 }
 
-async function writeJsonFile(filePath, payload) {
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, JSON.stringify(payload, null, 2), "utf-8");
-}
+async function uploadHarFileToR2(file) {
+  if (!file) {
+    return { uploaded: false, reason: "No HAR file payload was provided." };
+  }
 
-async function readLocalInspectionRuns() {
-  const rows = await readJsonFile(localInspectionRunsPath, []);
-  return Array.isArray(rows) ? rows : [];
-}
+  if (!r2Client || !r2Bucket) {
+    return { uploaded: false, reason: "Cloudflare R2 is not configured." };
+  }
 
-async function writeLocalInspectionRuns(rows) {
-  await writeJsonFile(localInspectionRunsPath, rows);
-}
+  const objectKey = `har/${new Date().toISOString().slice(0, 10)}/${buildRecordId(
+    "har"
+  )}-${sanitizeFileName(file.originalname || "capture.har")}`;
 
-async function rememberInspectionRun(payload, reason = "local") {
-  const rows = await readLocalInspectionRuns();
-  const savedRun = {
-    id: payload.id || `local-inspection-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-    created_at: payload.created_at || payload.ended_at || new Date().toISOString(),
-    storage_reason: reason,
-    ...payload
-  };
-  const duplicateIndex = rows.findIndex(
-    (item) =>
-      (savedRun.capture_session_id &&
-        (item.capture_session_id || "") === (savedRun.capture_session_id || "")) ||
-      (!savedRun.capture_session_id &&
-        (item.target_url || "") === (savedRun.target_url || "") &&
-        (item.ended_at || "") === (savedRun.ended_at || ""))
+  await r2Client.send(
+    new PutObjectCommand({
+      Bucket: r2Bucket,
+      Key: objectKey,
+      Body: file.buffer,
+      ContentType: file.mimetype || "application/json",
+      Metadata: {
+        originalname: sanitizeFileName(file.originalname || "capture.har")
+      }
+    })
   );
 
-  if (duplicateIndex >= 0) {
-    rows.splice(duplicateIndex, 1, {
-      ...rows[duplicateIndex],
-      ...savedRun,
-      id: rows[duplicateIndex].id || savedRun.id,
-      created_at: rows[duplicateIndex].created_at || savedRun.created_at
-    });
-    await writeLocalInspectionRuns(rows.slice(0, historyMaxRows));
-    return rows[duplicateIndex];
-  }
-
-  rows.unshift(savedRun);
-  await writeLocalInspectionRuns(rows.slice(0, historyMaxRows));
-  return savedRun;
+  return {
+    uploaded: true,
+    provider: "cloudflare-r2",
+    bucket: r2Bucket,
+    key: objectKey,
+    url: buildR2ObjectUrl(objectKey)
+  };
 }
 
 function resetCaptureCollections() {
@@ -982,18 +1051,57 @@ function buildCaptureSummaryPayload(capture) {
   };
 }
 
-async function saveAnalysisRecord(payload) {
-  if (!supabase) {
-    return { saved: false, reason: "Supabase credentials are not configured." };
+async function saveAnalysisRecord(payload, file) {
+  let fileStorage = { uploaded: false, reason: "Cloudflare R2 is not configured." };
+
+  try {
+    fileStorage = await uploadHarFileToR2(file);
+  } catch (error) {
+    fileStorage = {
+      uploaded: false,
+      reason: error instanceof Error ? error.message : "Cloudflare R2 upload failed."
+    };
   }
 
-  const { error } = await supabase.from("capture_har_analyses").insert(payload);
-
-  if (error) {
-    return { saved: false, reason: error.message };
+  if (!firestore) {
+    return {
+      saved: false,
+      reason: "Firebase credentials are not configured.",
+      fileSaved: Boolean(fileStorage.uploaded),
+      fileProvider: fileStorage.provider || null,
+      objectKey: fileStorage.key || null,
+      objectUrl: fileStorage.url || null
+    };
   }
 
-  return { saved: true };
+  const recordId = buildRecordId("har-analysis");
+  const createdAt = new Date().toISOString();
+
+  await firestore
+    .collection(firestoreCollectionNames.harAnalyses)
+    .doc(recordId)
+    .set({
+      id: recordId,
+      created_at: createdAt,
+      ...payload,
+      storage_provider: fileStorage.provider || (fileStorage.uploaded ? "cloudflare-r2" : null),
+      storage_bucket: fileStorage.bucket || null,
+      storage_key: fileStorage.key || null,
+      storage_url: fileStorage.url || null,
+      storage_uploaded: Boolean(fileStorage.uploaded),
+      storage_reason: fileStorage.reason || ""
+    });
+
+  return {
+    saved: true,
+    provider: "firebase-firestore",
+    id: recordId,
+    fileSaved: Boolean(fileStorage.uploaded),
+    fileProvider: fileStorage.provider || null,
+    objectKey: fileStorage.key || null,
+    objectUrl: fileStorage.url || null,
+    reason: fileStorage.uploaded ? "" : fileStorage.reason || ""
+  };
 }
 
 async function saveCaptureRecord(payload) {
@@ -1046,8 +1154,8 @@ async function saveCaptureEventsBatch(events) {
     return { saved: true, count: 0, skipped: Array.isArray(events) ? events.length : 0 };
   }
 
-  if (!supabase) {
-    return { saved: false, reason: "Supabase credentials are not configured." };
+  if (!firestore) {
+    return { saved: false, reason: "Firebase credentials are not configured." };
   }
 
   const sessionIds = [
@@ -1060,14 +1168,15 @@ async function saveCaptureEventsBatch(events) {
   const existingFingerprints = new Set();
 
   if (sessionIds.length > 0) {
-    const { data: existingRows, error: lookupError } = await supabase
-      .from("capture_http_events")
-      .select("capture_session_id, request_timestamp, request_method, request_url, response_status, error_text")
-      .in("capture_session_id", sessionIds);
+    for (let index = 0; index < sessionIds.length; index += 10) {
+      const sessionChunk = sessionIds.slice(index, index + 10);
+      const snapshot = await firestore
+        .collection(firestoreCollectionNames.captureEvents)
+        .where("capture_session_id", "in", sessionChunk)
+        .get();
 
-    if (!lookupError && Array.isArray(existingRows)) {
-      for (const row of existingRows) {
-        existingFingerprints.add(buildCaptureEventFingerprint(row));
+      for (const document of snapshot.docs) {
+        existingFingerprints.add(buildCaptureEventFingerprint(document.data()));
       }
     }
   }
@@ -1080,11 +1189,21 @@ async function saveCaptureEventsBatch(events) {
     return { saved: true, count: 0, skipped: validEvents.length };
   }
 
-  const { error } = await supabase.from("capture_http_events").insert(eventsToInsert);
+  const batch = firestore.batch();
+  const createdAt = new Date().toISOString();
 
-  if (error) {
-    return { saved: false, reason: error.message };
+  for (const event of eventsToInsert) {
+    const documentRef = firestore
+      .collection(firestoreCollectionNames.captureEvents)
+      .doc(buildRecordId("capture-event"));
+    batch.set(documentRef, {
+      id: documentRef.id,
+      created_at: createdAt,
+      ...event
+    });
   }
+
+  await batch.commit();
 
   return {
     saved: true,
@@ -1094,22 +1213,24 @@ async function saveCaptureEventsBatch(events) {
 }
 
 async function saveInspectionRun(payload) {
-  if (!supabase) {
-    const localRun = await rememberInspectionRun(payload, "Supabase credentials are not configured.");
-    return { saved: true, local: true, id: localRun.id, reason: localRun.storage_reason };
+  if (!firestore) {
+    return {
+      saved: false,
+      reason: "Firebase credentials are not configured. Inspection runs must be persisted to Firestore."
+    };
   }
 
   if (isUuid(payload.capture_session_id)) {
-    const { data: existingRows, error: lookupError } = await supabase
-      .from("capture_inspection_runs")
-      .select("id, report_snapshot")
-      .eq("capture_session_id", payload.capture_session_id)
-      .order("ended_at", { ascending: false })
-      .limit(1);
+    const existingSnapshot = await firestore
+      .collection(firestoreCollectionNames.inspectionRuns)
+      .where("capture_session_id", "==", payload.capture_session_id)
+      .limit(1)
+      .get();
 
-    if (!lookupError && Array.isArray(existingRows) && existingRows.length > 0) {
-      const existing = existingRows[0];
-      const existingSnapshot =
+    if (!existingSnapshot.empty) {
+      const existingDocument = existingSnapshot.docs[0];
+      const existing = existingDocument.data();
+      const existingReportSnapshot =
         existing.report_snapshot && typeof existing.report_snapshot === "object"
           ? existing.report_snapshot
           : {};
@@ -1117,33 +1238,47 @@ async function saveInspectionRun(payload) {
         payload.report_snapshot && typeof payload.report_snapshot === "object"
           ? payload.report_snapshot
           : {};
-      const { error: updateError } = await supabase
-        .from("capture_inspection_runs")
-        .update({
+      try {
+        await firestore
+          .collection(firestoreCollectionNames.inspectionRuns)
+          .doc(existingDocument.id)
+          .set({
+          ...existing,
           ...payload,
+          id: existing.id || existingDocument.id,
           report_snapshot: {
-            ...existingSnapshot,
+            ...existingReportSnapshot,
             ...nextSnapshot,
-            aiSummary: nextSnapshot.aiSummary || existingSnapshot.aiSummary,
-            aiSummaryMeta: nextSnapshot.aiSummaryMeta || existingSnapshot.aiSummaryMeta
+            aiSummary: nextSnapshot.aiSummary || existingReportSnapshot.aiSummary,
+            aiSummaryMeta: nextSnapshot.aiSummaryMeta || existingReportSnapshot.aiSummaryMeta
           }
-        })
-        .eq("id", existing.id);
+        });
 
-      if (!updateError) {
-        return { saved: true, updated: true, id: existing.id };
+        return { saved: true, updated: true, id: existing.id || existingDocument.id };
+      } catch (error) {
+        return {
+          saved: false,
+          reason: error instanceof Error ? error.message : "Firebase update failed."
+        };
       }
-
-      const localRun = await rememberInspectionRun(payload, updateError.message);
-      return { saved: true, local: true, id: localRun.id, reason: updateError.message };
     }
   }
 
-  const { error } = await supabase.from("capture_inspection_runs").insert(payload);
+  try {
+    const documentRef = firestore
+      .collection(firestoreCollectionNames.inspectionRuns)
+      .doc(payload.id || buildRecordId("inspection-run"));
 
-  if (error) {
-    const localRun = await rememberInspectionRun(payload, error.message);
-    return { saved: true, local: true, id: localRun.id, reason: error.message };
+    await documentRef.set({
+      id: documentRef.id,
+      created_at: payload.created_at || payload.ended_at || new Date().toISOString(),
+      ...payload
+    });
+  } catch (error) {
+    return {
+      saved: false,
+      reason: error instanceof Error ? error.message : "Firebase insert failed."
+    };
   }
 
   return { saved: true };
@@ -1156,206 +1291,151 @@ function isUuid(value) {
 }
 
 async function saveInspectionRunSummary(payload) {
-  if (!supabase) {
-    const localRuns = await readLocalInspectionRuns();
-    const runIndex = localRuns.findIndex((run) =>
-      isUuid(payload.capture_session_id)
-        ? run.capture_session_id === payload.capture_session_id
-        : run.target_url === payload.target_url
-    );
-
-    if (runIndex < 0) {
-      return { saved: false, reason: "No matching local inspection run was found." };
-    }
-
-    const summaryMeta =
-      payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
-    const reportSnapshot =
-      localRuns[runIndex].report_snapshot && typeof localRuns[runIndex].report_snapshot === "object"
-        ? localRuns[runIndex].report_snapshot
-        : {};
-
-    localRuns[runIndex] = {
-      ...localRuns[runIndex],
-      report_snapshot: {
-        ...reportSnapshot,
-        aiSummary: payload.summary,
-        aiSummaryMeta: {
-          ...summaryMeta,
-          syncedAt: new Date().toISOString()
-        }
-      }
+  if (!firestore) {
+    return {
+      saved: false,
+      reason: "Firebase credentials are not configured. Inspection summaries must be persisted to Firestore."
     };
-    await writeLocalInspectionRuns(localRuns);
-
-    return { saved: true, local: true, id: localRuns[runIndex].id };
   }
 
   if (!payload.summary) {
     return { saved: false, reason: "summary is required." };
   }
 
-  let query = supabase
-    .from("capture_inspection_runs")
-    .select("id, report_snapshot")
-    .order("ended_at", { ascending: false })
-    .limit(1);
-
-  if (isUuid(payload.capture_session_id)) {
-    query = query.eq("capture_session_id", payload.capture_session_id);
-  } else if (payload.target_url) {
-    query = query.eq("target_url", payload.target_url);
-  } else {
-    return { saved: false, reason: "capture_session_id or target_url is required." };
-  }
-
-  const { data, error } = await query;
-
-  if (error) {
-    const localRuns = await readLocalInspectionRuns();
-    const runIndex = localRuns.findIndex((run) =>
-      isUuid(payload.capture_session_id)
-        ? run.capture_session_id === payload.capture_session_id
-        : run.target_url === payload.target_url
-    );
-
-    if (runIndex < 0) {
-      return { saved: false, reason: error.message };
+  let snapshot = null;
+  try {
+    if (isUuid(payload.capture_session_id)) {
+      snapshot = await firestore
+        .collection(firestoreCollectionNames.inspectionRuns)
+        .where("capture_session_id", "==", payload.capture_session_id)
+        .limit(10)
+        .get();
+    } else if (payload.target_url) {
+      snapshot = await firestore
+        .collection(firestoreCollectionNames.inspectionRuns)
+        .where("target_url", "==", payload.target_url)
+        .limit(10)
+        .get();
+    } else {
+      return { saved: false, reason: "capture_session_id or target_url is required." };
     }
-
-    const summaryMeta =
-      payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
-    const reportSnapshot =
-      localRuns[runIndex].report_snapshot && typeof localRuns[runIndex].report_snapshot === "object"
-        ? localRuns[runIndex].report_snapshot
-        : {};
-
-    localRuns[runIndex] = {
-      ...localRuns[runIndex],
-      report_snapshot: {
-        ...reportSnapshot,
-        aiSummary: payload.summary,
-        aiSummaryMeta: {
-          ...summaryMeta,
-          syncedAt: new Date().toISOString()
-        }
-      }
+  } catch (error) {
+    return {
+      saved: false,
+      reason: error instanceof Error ? error.message : "Failed to look up inspection run."
     };
-    await writeLocalInspectionRuns(localRuns);
-
-    return { saved: true, local: true, id: localRuns[runIndex].id, reason: error.message };
   }
 
-  const run = Array.isArray(data) ? data[0] : null;
-  if (!run) {
+  const runDocument = sortByIsoDesc(snapshot.docs, (document) => document.data()?.ended_at)[0] || null;
+  if (!runDocument) {
     return { saved: false, reason: "No matching inspection run was found." };
   }
 
+  const run = runDocument.data();
   const summaryMeta =
     payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
   const reportSnapshot =
     run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {};
 
-  const { error: updateError } = await supabase
-    .from("capture_inspection_runs")
-    .update({
-      report_snapshot: {
-        ...reportSnapshot,
-        aiSummary: payload.summary,
-        aiSummaryMeta: {
-          ...summaryMeta,
-          syncedAt: new Date().toISOString()
+  try {
+    await firestore
+      .collection(firestoreCollectionNames.inspectionRuns)
+      .doc(runDocument.id)
+      .set({
+        ...run,
+        report_snapshot: {
+          ...reportSnapshot,
+          aiSummary: payload.summary,
+          aiSummaryMeta: {
+            ...summaryMeta,
+            syncedAt: new Date().toISOString()
+          }
         }
-      }
-    })
-    .eq("id", run.id);
-
-  if (updateError) {
-    return { saved: false, reason: updateError.message };
+      });
+  } catch (error) {
+    return {
+      saved: false,
+      reason: error instanceof Error ? error.message : "Failed to update inspection summary."
+    };
   }
 
-  return { saved: true, id: run.id };
+  return { saved: true, id: run.id || runDocument.id };
 }
 
 async function loadRecentHarAnalyses(limit = 10) {
-  if (!supabase) {
+  if (!firestore) {
     return [];
   }
 
-  const { data, error } = await supabase
-    .from("capture_har_analyses")
-    .select("*")
-    .order("created_at", { ascending: false })
+  const snapshot = await firestore
+    .collection(firestoreCollectionNames.harAnalyses)
+    .orderBy("created_at", "desc")
     .limit(limit);
 
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
+  const data = await snapshot.get();
+  return data.docs.map((document) => document.data());
 }
 
 const historyPageSize = 1000;
 const historyMaxRows = 5000;
 
 async function loadRecentCaptureEvents(limit = 500) {
-  if (!supabase) {
+  if (!firestore) {
     return [];
   }
 
-  const { data, error } = await supabase
-    .from("capture_http_events")
-    .select("*")
-    .order("created_at", { ascending: false })
+  const snapshot = await firestore
+    .collection(firestoreCollectionNames.captureEvents)
+    .orderBy("created_at", "desc")
     .limit(limit);
 
-  if (error) {
-    throw error;
-  }
-
-  return data || [];
+  const data = await snapshot.get();
+  return data.docs.map((document) => document.data());
 }
 
-async function loadAllSupabaseRows(table, orderColumn) {
-  if (!supabase) {
+async function loadAllFirestoreRows(collectionName, orderColumn) {
+  if (!firestore) {
     return [];
   }
 
   const rows = [];
+  let cursor = null;
 
-  for (let from = 0; from < historyMaxRows; from += historyPageSize) {
-    const to = Math.min(from + historyPageSize - 1, historyMaxRows - 1);
-    const { data, error } = await supabase
-      .from(table)
-      .select("*")
-      .order(orderColumn, { ascending: false })
-      .range(from, to);
+  while (rows.length < historyMaxRows) {
+    let query = firestore
+      .collection(collectionName)
+      .orderBy(orderColumn, "desc")
+      .limit(historyPageSize);
 
-    if (error) {
-      throw error;
+    if (cursor) {
+      query = query.startAfter(cursor);
     }
 
-    const page = Array.isArray(data) ? data : [];
-    rows.push(...page);
+    const snapshot = await query.get();
+    if (snapshot.empty) {
+      break;
+    }
 
-    if (page.length < historyPageSize) {
+    const pageRows = snapshot.docs.map((document) => document.data());
+    rows.push(...pageRows);
+    cursor = snapshot.docs[snapshot.docs.length - 1];
+
+    if (snapshot.docs.length < historyPageSize) {
       break;
     }
   }
 
-  return rows;
+  return rows.slice(0, historyMaxRows);
 }
 
 async function loadRecentInspectionRuns() {
-  const localRuns = await readLocalInspectionRuns();
-
-  if (!supabase) {
-    return localRuns;
+  if (!firestore) {
+    return [];
   }
 
   let remoteRuns = [];
   try {
-    remoteRuns = await loadAllSupabaseRows("capture_inspection_runs", "created_at");
+    remoteRuns = await loadAllFirestoreRows(firestoreCollectionNames.inspectionRuns, "created_at");
   } catch (error) {
     console.warn(
       "Inspection runs remote load failed; using local history:",
@@ -1363,24 +1443,7 @@ async function loadRecentInspectionRuns() {
     );
   }
 
-  const merged = [...localRuns, ...remoteRuns];
-  const seen = new Set();
-
-  return merged.filter((run) => {
-    const key = [
-      run.capture_session_id || "",
-      run.target_url || "",
-      run.ended_at || "",
-      run.id || ""
-    ].join("::");
-
-    if (seen.has(key)) {
-      return false;
-    }
-
-    seen.add(key);
-    return true;
-  });
+  return remoteRuns;
 }
 
 function attachCaptureListeners(page, targetHost) {
@@ -1560,6 +1623,7 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   const parsedTargetUrl = new URL(targetUrl);
   const targetHost = parsedTargetUrl.host;
   const captureMode = authOptions.captureMode === "session" ? "session" : "manual";
+  const launchHeadless = captureMode === "manual" ? false : playwrightHeadless;
   const popupWidth = 1280;
   const popupHeight = 860;
   const screenWidth = 1728;
@@ -1570,15 +1634,22 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   await closeCaptureBrowser();
   resetCaptureCollections();
 
-  const browser = await chromium.launch({
-    headless: playwrightHeadless,
+  const launchOptions = {
+    headless: launchHeadless,
     args: [
       "--no-sandbox",
       "--disable-dev-shm-usage",
       `--window-size=${popupWidth},${popupHeight}`,
       `--window-position=${windowX},${windowY}`
     ]
-  });
+  };
+
+  if (captureMode === "manual") {
+    launchOptions.ignoreDefaultArgs = ["--no-startup-window"];
+    launchOptions.channel = "chrome";
+  }
+
+  const browser = await chromium.launch(launchOptions);
 
   const context = await browser.newContext({
     viewport: {
@@ -1843,7 +1914,11 @@ app.get("/api/health", (_request, response) => {
   response.json({
     ok: true,
     service: "http-analyzer-api",
-    supabaseConfigured: Boolean(supabase),
+    databaseConfigured: Boolean(firestore),
+    databaseProvider: firestore ? "firebase-firestore" : "",
+    capturePersistenceReady: Boolean(firestore),
+    objectStorageConfigured: Boolean(r2Client && r2Bucket),
+    objectStorageProvider: r2Client && r2Bucket ? "cloudflare-r2" : "",
     captureDisabled: disableCapture,
     captureIdleAutoStopMs,
     captureCrawlEnabled,
@@ -2178,7 +2253,7 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
       status_codes: summary.statusCodes,
       content_types: summary.contentTypes,
       failed_requests: summary.failedRequests
-    });
+    }, request.file);
 
     response.json({
       fileName: request.file.originalname,
@@ -2214,12 +2289,10 @@ app.get("/api/recent-analyses", async (_request, response) => {
 
   response.json({
     harAnalyses: harAnalyses.status === "fulfilled" ? harAnalyses.value : [],
-    captureEvents: [
-      ...memoryRecentCaptureEvents,
-      ...(captureEvents.status === "fulfilled" ? captureEvents.value : [])
-    ].slice(0, 50),
+    captureEvents: captureEvents.status === "fulfilled" ? captureEvents.value : [],
     inspectionRuns: inspectionRuns.status === "fulfilled" ? inspectionRuns.value : [],
-    partialErrors: errors
+    partialErrors: errors,
+    dbBacked: Boolean(firestore)
   });
 });
 
