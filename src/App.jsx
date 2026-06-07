@@ -210,6 +210,43 @@ function isLocalRuntime() {
   return LOCAL_HOSTNAMES.has(window.location.hostname);
 }
 
+function normalizeBrowserTargetUrl(input) {
+  const trimmed = String(input || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
+  try {
+    return new URL(withProtocol).toString();
+  } catch {
+    return withProtocol;
+  }
+}
+
+function openManualBrowserWindow(input) {
+  if (typeof window === "undefined") {
+    return true;
+  }
+
+  const targetUrl = normalizeBrowserTargetUrl(input);
+  if (!targetUrl) {
+    return false;
+  }
+
+  const width = 1280;
+  const height = 860;
+  const left = Math.max(0, Math.round((window.screen.width - width) / 2));
+  const top = Math.max(0, Math.round((window.screen.height - height) / 2));
+  const popup = window.open(
+    targetUrl,
+    `http-analyzer-manual-capture-${Date.now()}`,
+    `popup=yes,width=${width},height=${height},left=${left},top=${top},noopener,noreferrer`
+  );
+  popup?.focus?.();
+  return Boolean(popup);
+}
+
 async function loadRecentFromBackend() {
   if (!API_BASE_URL) {
     return {
@@ -4583,13 +4620,6 @@ export default function App() {
       return;
     }
 
-    if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
-      setStatusMessage(
-        "새창 수동 캡처는 로컬 앱에서만 새창을 열 수 있습니다. http://127.0.0.1:5678 에서 실행해주세요."
-      );
-      return;
-    }
-
     setSubmitting(true);
     setStatusMessage(selectedCaptureMode === "manual" ? "새창 수동 캡처를 시작합니다. 브라우저 창을 여는 중입니다." : "");
     setLoginFailureModal("");
@@ -4598,6 +4628,15 @@ export default function App() {
     try {
       if (!domain.trim()) {
         throw new Error("Domain을 입력해주세요.");
+      }
+
+      if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
+        const opened = openManualBrowserWindow(domain);
+        if (!opened) {
+          throw new Error("새창이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도해주세요.");
+        }
+        setStatusMessage("새창을 열었습니다. 네트워크 캡처 저장은 로컬 앱에서 실행해야 합니다.");
+        return;
       }
 
       if (selectedCaptureMode === "session" && !sessionValue.trim()) {
