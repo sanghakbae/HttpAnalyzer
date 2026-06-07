@@ -141,6 +141,12 @@ CAPTURE_CRAWL_MAX_PAGES=8
 CAPTURE_CRAWL_PAGE_DELAY_MS=1500
 CAPTURE_LOGIN_WAIT_MS=3000
 FIREBASE_SERVICE_ACCOUNT_JSON={"project_id":"<project-id>","client_email":"firebase-adminsdk@<project-id>.iam.gserviceaccount.com","private_key":"-----BEGIN PRIVATE KEY-----\\n...\\n-----END PRIVATE KEY-----\\n"}
+# 또는 개별 환경변수
+FIREBASE_PROJECT_ID=<project-id>
+FIREBASE_CLIENT_EMAIL=firebase-adminsdk@<project-id>.iam.gserviceaccount.com
+FIREBASE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n
+# 또는 로컬 파일 경로
+FIREBASE_SERVICE_ACCOUNT_PATH=/absolute/path/to/firebase-service-account.json
 CLOUDFLARE_R2_ACCOUNT_ID=<cloudflare-account-id>
 CLOUDFLARE_R2_ACCESS_KEY_ID=<r2-access-key-id>
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-access-key>
@@ -155,6 +161,7 @@ CLOUDFLARE_R2_PUBLIC_BASE_URL=https://<public-bucket-host>
 - `VITE_*`
   프런트에서 사용하는 값입니다. `VITE_FIREBASE_*`는 Firebase Auth와 Firestore 클라이언트 fallback에 사용합니다.
 - `FIREBASE_SERVICE_ACCOUNT_JSON`
+  또는 `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_SERVICE_ACCOUNT_PATH`
   서버에서 Firestore에 점검 이력과 캡처 이벤트를 저장할 때 사용합니다.
 - `CLOUDFLARE_R2_*`
   HAR 원본 파일을 Cloudflare R2에 업로드할 때 사용합니다.
@@ -407,7 +414,9 @@ HOST=0.0.0.0
 DISABLE_CAPTURE=false
 PLAYWRIGHT_HEADLESS=true
 DISABLE_SQLMAP=true
-FIREBASE_SERVICE_ACCOUNT_JSON=<firebase-service-account-json>
+FIREBASE_PROJECT_ID=<project-id>
+FIREBASE_CLIENT_EMAIL=<firebase-client-email>
+FIREBASE_PRIVATE_KEY=<firebase-private-key>
 CLOUDFLARE_R2_ACCOUNT_ID=<cloudflare-account-id>
 CLOUDFLARE_R2_ACCESS_KEY_ID=<r2-access-key-id>
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-access-key>

@@ -11,7 +11,6 @@ import {
   signOutFirebaseUser
 } from "./firebaseClient";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:4000";
 const AUTH_STORAGE_KEY = "http-analyzer-auth-user";
 const ALLOWED_GOOGLE_EMAIL = "totoriverce@gmail.com";
 const LOCAL_HAR_HISTORY_KEY = "http-analyzer-local-har-history";
@@ -22,6 +21,11 @@ const LOCAL_AI_SUMMARIES_KEY = "http-analyzer-local-ai-summaries";
 const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+const LOCAL_API_BASE_URL = "http://127.0.0.1:4000";
+const API_BASE_URL =
+  typeof window !== "undefined" && LOCAL_HOSTNAMES.has(window.location.hostname)
+    ? LOCAL_API_BASE_URL
+    : import.meta.env.VITE_API_BASE_URL || LOCAL_API_BASE_URL;
 const TOKEN_REGEX = new RegExp(
   `("(?:\\\\.|[^"])*":)|("(?:\\\\.|[^"])*")|('(?:\\\\.|[^'])*')|(<!--.*?-->)|(<!DOCTYPE[^>]*>)|(</?[\\w:-]+[^>]*>)|\\b\\d+(?:\\.\\d+)?\\b|\\btrue\\b|\\bfalse\\b|\\bnull\\b|[{}\\[\\](),:]`,
   "g"

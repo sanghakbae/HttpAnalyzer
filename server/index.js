@@ -26,6 +26,7 @@ app.use(cors());
 app.use(express.json({ limit: "4mb" }));
 
 const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+const firebaseServiceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
 const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
 const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
 const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY;
@@ -49,7 +50,43 @@ const captureLoginWaitMs = Number(process.env.CAPTURE_LOGIN_WAIT_MS || 3000);
 const sqlmapBin = process.env.SQLMAP_BIN || "sqlmap";
 const disableSqlmap = process.env.DISABLE_SQLMAP === "true" || Boolean(process.env.RENDER);
 
-function buildFirebaseCredential() {
+async function focusChromeWindow() {
+  try {
+    await execFileAsync("osascript", [
+      "-e",
+      'tell application "Google Chrome" to activate'
+    ]);
+  } catch {
+    return;
+  }
+}
+
+async function loadFirebaseServiceAccountFromPath() {
+  if (!firebaseServiceAccountPath) {
+    return null;
+  }
+
+  try {
+    const raw = await fs.readFile(firebaseServiceAccountPath, "utf8");
+    return JSON.parse(raw);
+  } catch (error) {
+    console.warn(
+      "Firebase service account file read failed:",
+      error instanceof Error ? error.message : String(error)
+    );
+    return null;
+  }
+}
+
+function buildFirebaseCredential(serviceAccountFromPath = null) {
+  if (serviceAccountFromPath) {
+    return cert({
+      projectId: serviceAccountFromPath.project_id,
+      clientEmail: serviceAccountFromPath.client_email,
+      privateKey: String(serviceAccountFromPath.private_key || "")
+    });
+  }
+
   if (firebaseServiceAccountJson) {
     const parsed = JSON.parse(firebaseServiceAccountJson);
     return cert({
@@ -70,9 +107,10 @@ function buildFirebaseCredential() {
   return null;
 }
 
-function initializeFirebase() {
+async function initializeFirebase() {
   try {
-    const credential = buildFirebaseCredential();
+    const serviceAccountFromPath = await loadFirebaseServiceAccountFromPath();
+    const credential = buildFirebaseCredential(serviceAccountFromPath);
     if (!credential) {
       return null;
     }
@@ -91,8 +129,6 @@ function initializeFirebase() {
   }
 }
 
-const firebaseApp = initializeFirebase();
-const firestore = firebaseApp ? getFirestore(firebaseApp) : null;
 const r2Client =
   r2Endpoint && r2AccessKeyId && r2SecretAccessKey
     ? new S3Client({
@@ -104,6 +140,8 @@ const r2Client =
         }
       })
     : null;
+let firebaseApp = null;
+let firestore = null;
 
 const captureState = {
   browser: null,
@@ -1688,6 +1726,8 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
     scheduleCaptureIdleStop();
   } else {
     await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+    await page.bringToFront().catch(() => null);
+    await focusChromeWindow();
   }
 
   if (!sessionWasApplied) {
@@ -2298,6 +2338,20 @@ app.get("/api/recent-analyses", async (_request, response) => {
 
 const port = process.env.PORT || 4000;
 const host = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
-app.listen(port, host, () => {
-  console.log(`HAR analysis server listening on http://${host}:${port}`);
+
+async function startServer() {
+  firebaseApp = await initializeFirebase();
+  firestore = firebaseApp ? getFirestore(firebaseApp) : null;
+
+  app.listen(port, host, () => {
+    console.log(`HAR analysis server listening on http://${host}:${port}`);
+  });
+}
+
+startServer().catch((error) => {
+  console.error(
+    "Failed to start server:",
+    error instanceof Error ? error.message : String(error)
+  );
+  process.exit(1);
 });
