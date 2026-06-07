@@ -4577,15 +4577,21 @@ export default function App() {
     setActiveSection("sqlmap");
   }
 
-  async function startCapture(event) {
-    event.preventDefault();
+  async function startCaptureForMode(selectedCaptureMode) {
     if (readOnlyDeployment) {
       setStatusMessage("배포 사이트에서는 캡처를 실행할 수 없습니다. 로컬 앱을 사용해주세요.");
       return;
     }
 
+    if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
+      setStatusMessage(
+        "새창 수동 캡처는 로컬 앱에서만 새창을 열 수 있습니다. http://127.0.0.1:5678 에서 실행해주세요."
+      );
+      return;
+    }
+
     setSubmitting(true);
-    setStatusMessage("");
+    setStatusMessage(selectedCaptureMode === "manual" ? "새창 수동 캡처를 시작합니다. 브라우저 창을 여는 중입니다." : "");
     setLoginFailureModal("");
     loginFailurePopupKeyRef.current = "";
 
@@ -4594,7 +4600,7 @@ export default function App() {
         throw new Error("Domain을 입력해주세요.");
       }
 
-      if (captureMode === "session" && !sessionValue.trim()) {
+      if (selectedCaptureMode === "session" && !sessionValue.trim()) {
         throw new Error("세션 입력 모드에서는 Session 값을 입력해야 합니다.");
       }
 
@@ -4608,8 +4614,8 @@ export default function App() {
         body: JSON.stringify({
           domain,
           excludePatterns,
-          sessionValue: captureMode === "session" ? sessionValue.trim() : "",
-          captureMode
+          sessionValue: selectedCaptureMode === "session" ? sessionValue.trim() : "",
+          captureMode: selectedCaptureMode
         })
       });
 
@@ -4622,7 +4628,9 @@ export default function App() {
 
       setStatusMessage(
         backendHealth.databaseConfigured
-          ? ""
+          ? selectedCaptureMode === "manual"
+            ? "새창 수동 캡처가 시작되었습니다. 열린 창에서 직접 이동하면 요청/응답이 캡처됩니다."
+            : ""
           : "캡처 창을 열었습니다. 현재 DB가 연결되지 않아 결과는 localStorage에 임시 보관되며, Firebase 연결 후 자동 동기화됩니다."
       );
       setCaptureSessionId(result.sessionId || "");
@@ -4641,7 +4649,7 @@ export default function App() {
         sessionStatus: result.sessionStatus || "skipped",
         sessionError: result.sessionError || ""
       });
-      if (result.sessionValue) {
+      if (result.sessionValue && selectedCaptureMode === "session") {
         setSessionValue(result.sessionValue);
       }
       activeRef.current = true;
@@ -4656,6 +4664,11 @@ export default function App() {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  async function startCapture(event) {
+    event.preventDefault();
+    await startCaptureForMode(captureMode);
   }
 
   async function stopCapture() {
@@ -6336,7 +6349,11 @@ export default function App() {
                     <button
                       type="button"
                       className={captureMode === "manual" ? "capture-mode-chip active" : "capture-mode-chip"}
-                      onClick={() => setCaptureMode("manual")}
+                      onClick={() => {
+                        setCaptureMode("manual");
+                        void startCaptureForMode("manual");
+                      }}
+                      disabled={submitting || active}
                     >
                       새창 수동 캡처
                     </button>

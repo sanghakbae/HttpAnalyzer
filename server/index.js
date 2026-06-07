@@ -50,14 +50,49 @@ const captureLoginWaitMs = Number(process.env.CAPTURE_LOGIN_WAIT_MS || 3000);
 const sqlmapBin = process.env.SQLMAP_BIN || "sqlmap";
 const disableSqlmap = process.env.DISABLE_SQLMAP === "true" || Boolean(process.env.RENDER);
 
-async function focusChromeWindow() {
-  try {
-    await execFileAsync("osascript", [
-      "-e",
-      'tell application "Google Chrome" to activate'
-    ]);
-  } catch {
-    return;
+async function focusChromeWindow(targetUrl = "") {
+  const safeTargetUrl = String(targetUrl || "").replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const focusTargetWindowScript = safeTargetUrl
+    ? `
+tell application "Google Chrome"
+  activate
+  repeat with currentWindow in windows
+    try
+      if (URL of active tab of currentWindow) starts with "${safeTargetUrl}" then
+        set index of currentWindow to 1
+        set active tab index of currentWindow to 1
+        exit repeat
+      end if
+    end try
+  end repeat
+end tell
+`
+    : 'tell application "Google Chrome" to activate';
+
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    try {
+      await execFileAsync("osascript", ["-e", focusTargetWindowScript]);
+    } catch {
+      return;
+    }
+
+    if (!safeTargetUrl) {
+      return;
+    }
+
+    try {
+      const { stdout } = await execFileAsync("osascript", [
+        "-e",
+        'tell application "Google Chrome" to if (count of windows) > 0 then get URL of active tab of front window'
+      ]);
+      if (stdout.trim().startsWith(targetUrl)) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    await sleep(250);
   }
 }
 
@@ -1727,7 +1762,7 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   } else {
     await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
     await page.bringToFront().catch(() => null);
-    await focusChromeWindow();
+    await focusChromeWindow(targetUrl);
   }
 
   if (!sessionWasApplied) {
