@@ -247,6 +247,19 @@ function openManualBrowserWindow(input) {
   return Boolean(popup);
 }
 
+async function postCaptureStart(apiBaseUrl, payload) {
+  const response = await fetch(`${apiBaseUrl}/api/capture/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  const { data, rawText } = await readJsonSafely(response);
+  if (!response.ok) {
+    throw new Error(data?.error || rawText || "캡처 시작에 실패했습니다.");
+  }
+  return data || {};
+}
+
 async function loadRecentFromBackend() {
   if (!API_BASE_URL) {
     return {
@@ -4630,15 +4643,6 @@ export default function App() {
         throw new Error("Domain을 입력해주세요.");
       }
 
-      if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
-        const opened = openManualBrowserWindow(domain);
-        if (!opened) {
-          throw new Error("새창이 차단되었습니다. 브라우저 팝업 허용 후 다시 시도해주세요.");
-        }
-        setStatusMessage("새창을 열었습니다. 네트워크 캡처 저장은 로컬 앱에서 실행해야 합니다.");
-        return;
-      }
-
       if (selectedCaptureMode === "session" && !sessionValue.trim()) {
         throw new Error("세션 입력 모드에서는 Session 값을 입력해야 합니다.");
       }
@@ -4647,23 +4651,32 @@ export default function App() {
         ? getCombinedExcludePatterns(excludeInput)
         : [...FIXED_EXCLUDE_PATTERNS];
 
-      const response = await fetch(`${API_BASE_URL}/api/capture/start`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          domain,
-          excludePatterns,
-          sessionValue: selectedCaptureMode === "session" ? sessionValue.trim() : "",
-          captureMode: selectedCaptureMode
-        })
-      });
+      const capturePayload = {
+        domain,
+        excludePatterns,
+        sessionValue: selectedCaptureMode === "session" ? sessionValue.trim() : "",
+        captureMode: selectedCaptureMode
+      };
 
-      const { data, rawText } = await readJsonSafely(response);
-      if (!response.ok) {
-        throw new Error(data?.error || rawText || "캡처 시작에 실패했습니다.");
+      let result;
+      if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
+        try {
+          result = await postCaptureStart(LOCAL_API_BASE_URL, capturePayload);
+        } catch (localError) {
+          const opened = openManualBrowserWindow(domain);
+          if (!opened) {
+            throw new Error(
+              "로컬 캡처 백엔드에 연결할 수 없고 새창도 차단되었습니다. 로컬 서버 실행 또는 팝업 허용을 확인해주세요."
+            );
+          }
+          setStatusMessage(
+            `일반 새창만 열었습니다. 자동 캡처를 하려면 로컬 백엔드(${LOCAL_API_BASE_URL})가 실행 중이어야 합니다.`
+          );
+          return;
+        }
+      } else {
+        result = await postCaptureStart(API_BASE_URL, capturePayload);
       }
-
-      const result = data || {};
 
       setStatusMessage(
         backendHealth.databaseConfigured
