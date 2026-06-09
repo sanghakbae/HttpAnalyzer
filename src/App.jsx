@@ -210,43 +210,6 @@ function isLocalRuntime() {
   return LOCAL_HOSTNAMES.has(window.location.hostname);
 }
 
-function normalizeBrowserTargetUrl(input) {
-  const trimmed = String(input || "").trim();
-  if (!trimmed) {
-    return "";
-  }
-
-  const withProtocol = /^https?:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`;
-  try {
-    return new URL(withProtocol).toString();
-  } catch {
-    return withProtocol;
-  }
-}
-
-function openManualBrowserWindow(input) {
-  if (typeof window === "undefined") {
-    return true;
-  }
-
-  const targetUrl = normalizeBrowserTargetUrl(input);
-  if (!targetUrl) {
-    return false;
-  }
-
-  const width = 1280;
-  const height = 860;
-  const left = Math.max(0, Math.round((window.screen.width - width) / 2));
-  const top = Math.max(0, Math.round((window.screen.height - height) / 2));
-  const popup = window.open(
-    targetUrl,
-    `http-analyzer-manual-capture-${Date.now()}`,
-    `popup=yes,width=${width},height=${height},left=${left},top=${top},noopener,noreferrer`
-  );
-  popup?.focus?.();
-  return Boolean(popup);
-}
-
 async function postCaptureStart(apiBaseUrl, payload) {
   const response = await fetch(`${apiBaseUrl}/api/capture/start`, {
     method: "POST",
@@ -4663,16 +4626,9 @@ export default function App() {
         try {
           result = await postCaptureStart(LOCAL_API_BASE_URL, capturePayload);
         } catch (localError) {
-          const opened = openManualBrowserWindow(domain);
-          if (!opened) {
-            throw new Error(
-              "로컬 캡처 백엔드에 연결할 수 없고 새창도 차단되었습니다. 로컬 서버 실행 또는 팝업 허용을 확인해주세요."
-            );
-          }
-          setStatusMessage(
-            `일반 새창만 열었습니다. 자동 캡처를 하려면 로컬 백엔드(${LOCAL_API_BASE_URL})가 실행 중이어야 합니다.`
+          throw new Error(
+            `자동 캡처용 로컬 백엔드(${LOCAL_API_BASE_URL})에 연결할 수 없습니다. 로컬 앱/백엔드를 실행한 뒤 다시 시도해주세요.`
           );
-          return;
         }
       } else {
         result = await postCaptureStart(API_BASE_URL, capturePayload);
