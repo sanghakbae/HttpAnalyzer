@@ -1696,10 +1696,30 @@ function attachCaptureListeners(page, targetHost) {
     void refreshCapturedSessionValue(page.context(), captureState.targetUrl);
   });
 
+  page.on("download", () => {
+    touchCaptureActivity();
+  });
+
   page.on("close", () => {
-    if (page === captureState.page || page.context() === captureState.context) {
-      void closeCaptureBrowser({ clearMetadata: false, reason: "browser-closed" });
+    if (page.context() !== captureState.context) {
+      return;
     }
+
+    setTimeout(() => {
+      if (!captureState.context || captureState.closing) {
+        return;
+      }
+
+      const openPages = captureState.context.pages().filter((contextPage) => !contextPage.isClosed());
+      if (openPages.length === 0) {
+        void closeCaptureBrowser({ clearMetadata: false, reason: "browser-closed" });
+        return;
+      }
+
+      if (page === captureState.page) {
+        captureState.page = openPages[0];
+      }
+    }, 250);
   });
 }
 
@@ -1737,6 +1757,7 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   const browser = await chromium.launch(launchOptions);
 
   const context = await browser.newContext({
+    acceptDownloads: true,
     viewport: {
       width: popupWidth,
       height: popupHeight - 96
