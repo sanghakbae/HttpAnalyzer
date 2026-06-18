@@ -432,6 +432,7 @@ input {
 .login-copy {
   margin: 14px 0 0;
   color: #cbd5e1;
+  font-size: 14px !important;
   line-height: 1.7;
 }
 
@@ -441,22 +442,26 @@ input {
 
 .login-actions {
   margin-top: 24px;
-  display: grid;
-  gap: 14px;
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 10px;
 }
 
 .google-login-button {
-  min-height: 44px;
+  min-height: 34px;
+  padding: 6px 12px;
+  font-size: 12px !important;
 }
 
 .local-dev-login-button {
-  justify-self: start;
-  padding: 8px 14px;
+  min-height: 34px;
+  padding: 6px 12px;
   border-radius: 999px;
   border: 1px solid rgba(159, 182, 255, 0.4);
   background: rgba(255, 255, 255, 0.08);
   color: #e5edff;
-  font-size: 0.82rem;
+  font-size: 12px !important;
   font-weight: 700;
 }
 
@@ -4557,24 +4562,155 @@ button,
 }
 
 @media (max-width: 760px) {
+  html,
+  body,
+  #root {
+    height: auto;
+    min-height: 100%;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+
   .page-shell {
     height: auto;
     min-height: 100vh;
+    padding-bottom: 82px;
+    overflow: visible;
+  }
+
+  .app-layout,
+  .app-layout.sidebar-collapsed {
+    display: block;
+    min-height: 100vh;
+  }
+
+  .sidebar-card {
+    position: fixed;
+    inset: auto 10px 10px;
+    z-index: 60;
+    width: auto;
+    min-height: 0;
+    padding: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 22px;
+    background: rgba(23, 34, 52, 0.94);
+    box-shadow: 0 18px 50px rgba(15, 23, 42, 0.34);
+    backdrop-filter: blur(16px);
+  }
+
+  .sidebar-brand,
+  .backend-status-card {
+    display: none;
+  }
+
+  .sidebar-nav {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: minmax(76px, 1fr);
+    grid-template-columns: none;
+    gap: 6px;
+    width: 100%;
+    padding: 0;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+
+  .sidebar-nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .sidebar-nav-item {
+    min-width: 76px;
+    min-height: 56px;
+    padding: 8px 8px 7px;
+    border-radius: 16px;
+    justify-items: center;
+    text-align: center;
+  }
+
+  .sidebar-nav-topline {
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    width: 100%;
+  }
+
+  .sidebar-nav-icon {
+    width: 18px;
+    height: 18px;
+    flex-basis: auto;
+  }
+
+  .sidebar-nav-icon svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .sidebar-nav-label {
+    max-width: 68px;
+    font-size: 10px !important;
+    line-height: 1.1;
+    white-space: normal;
+  }
+
+  .content-shell {
+    width: 100%;
+    min-width: 0;
   }
 
   .topbar {
     gap: 10px;
     min-height: auto;
-    padding-block: 12px;
+    padding-block: 0;
+    width: 100%;
+    margin-inline: 0;
+    padding-inline: 12px;
+    background: transparent;
+    border: 0;
+    box-shadow: none;
+    backdrop-filter: none;
   }
 
   .topbar-badges {
-    gap: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    justify-content: flex-end;
+    align-items: center;
+    width: 100%;
+    overflow-x: visible;
+    scrollbar-width: none;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+  }
+
+  .topbar-badges::-webkit-scrollbar {
+    display: none;
+  }
+
+  .topbar-badges > * {
+    min-width: 0;
+    width: auto;
+    flex: 0 1 auto;
+    justify-content: center;
+    padding-inline: 5px;
+    white-space: nowrap;
   }
 
   .dashboard-ribbon {
-    grid-template-columns: 1fr;
-    gap: 12px;
+    grid-template-columns: repeat(4, minmax(76px, 1fr));
+    gap: 5px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .dashboard-ribbon::-webkit-scrollbar {
+    display: none;
   }
 
   .overview-command-head {
@@ -4587,11 +4723,85 @@ button,
 
   .overview-module-grid {
     grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .overview-command-center {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .overview-command-head {
+    padding-inline: 4px;
+    gap: 6px;
+  }
+
+  .overview-module-card {
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    min-height: 0;
+    padding: 6px 8px;
+    gap: 2px 8px;
+    border-radius: 10px;
+  }
+
+  .overview-module-label {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .overview-module-card strong {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .overview-module-meta {
+    grid-column: 2;
+    grid-row: 2;
+    max-width: 112px;
+    white-space: nowrap;
+  }
+
+  .overview-module-card small {
+    display: none;
+  }
+
+  .overview-module-card em {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    margin-top: 0;
+    padding: 4px 7px;
+  }
+
+  .overview-snapshot-grid {
+    gap: 6px;
+  }
+
+  .overview-snapshot-card {
+    gap: 2px;
+    padding: 7px 8px;
+    border-radius: 10px;
+    line-height: 1.15;
+  }
+
+  .overview-snapshot-card span {
+    line-height: 1.05;
+    letter-spacing: 0.08em;
+  }
+
+  .overview-snapshot-card strong,
+  .overview-snapshot-card small {
+    line-height: 1.12;
   }
 
   .dashboard-ribbon-card {
-    min-height: 92px;
-    padding: 16px 18px;
+    min-height: 58px;
+    padding: 5px;
+    border-radius: 10px;
   }
 
   .dashboard-ribbon-card strong {
@@ -4601,7 +4811,7 @@ button,
   .capture-control-panel .field-label {
     flex-direction: column;
     align-items: stretch;
-    gap: 6px;
+    gap: 5px;
   }
 
   .capture-control-panel .field-label span {
@@ -4609,12 +4819,25 @@ button,
   }
 
   .capture-control-panel .action-row.action-card {
-    grid-template-columns: repeat(5, minmax(132px, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 5px;
+    overflow: visible;
+  }
+
+  .capture-control-panel .action-row.action-card > button,
+  .capture-control-panel .action-row.action-card .export-menu,
+  .capture-control-panel .action-row.action-card .export-menu summary {
+    min-width: 0;
+    width: 100%;
+    padding: 5px;
+    border-radius: 10px;
+    white-space: normal;
   }
 
   .pair-list {
-    gap: 16px;
-    padding: 16px 12px 18px;
+    gap: 8px;
+    padding: 8px 6px 10px;
+    overflow: visible;
   }
 
   .panel,
@@ -4624,6 +4847,71 @@ button,
   .tool-result,
   .inspection-run-table {
     border-radius: 12px;
+  }
+
+  .panel.stacked-panel {
+    padding: 0;
+    border: 0;
+    background: transparent;
+    box-shadow: none;
+    overflow: visible;
+  }
+
+  .hero-card,
+  .sidebar-card,
+  .capture-control-panel,
+  .dashboard-ribbon-card,
+  .overview-module-card,
+  .overview-snapshot-card,
+  .overview-command-meta span,
+  .panel,
+  .exchange-side,
+  .exchange-column,
+  .tool-panel,
+  .tool-result,
+  .inspection-run-table,
+  .empty-state-card,
+  .har-panel,
+  .recent-capture-panel,
+  .recent-card,
+  .har-result-card,
+  .stats-card,
+  .capture-checklist-row,
+  .compare-detail-card,
+  .inspection-run-item,
+  .field-label input,
+  .capture-form input,
+  .capture-mode-chip,
+  .topbar-badges > *,
+  .action-row button,
+  .export-menu summary,
+  .sidebar-nav-item {
+    border-radius: 10px;
+  }
+
+  .hero-card,
+  .sidebar-card,
+  .capture-control-panel,
+  .dashboard-ribbon-card,
+  .overview-module-card,
+  .overview-snapshot-card,
+  .panel,
+  .exchange-side,
+  .exchange-column,
+  .tool-panel,
+  .tool-result,
+  .empty-state-card,
+  .har-panel,
+  .recent-capture-panel,
+  .recent-card,
+  .har-result-card,
+  .stats-card,
+  .capture-checklist-row,
+  .compare-detail-card,
+  .inspection-run-item,
+  .topbar-badges > *,
+  .capture-mode-chip {
+    padding: 5px;
   }
 
   .exchange-heading,
@@ -4660,4 +4948,88 @@ button,
   .compare-detail-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Final typography scale */
+:root {
+  --type-body: 10px;
+  --type-title: 10px;
+  --type-caption: 8px;
+}
+
+body,
+body * {
+  font-size: var(--type-body) !important;
+}
+
+body,
+button,
+input,
+textarea,
+select,
+.panel,
+.tool-panel,
+.tool-result,
+.exchange-card,
+.recent-card,
+.har-result-card,
+.stats-card,
+.empty-state-card,
+.capture-checklist-row,
+.compare-detail-card,
+.inspection-run-item {
+  font-size: var(--type-body) !important;
+}
+
+.page-title,
+.section-title,
+.workspace-title,
+.sidebar-title,
+.panel h1,
+.panel h2,
+.panel h3,
+.tool-panel h2,
+.tool-panel h3,
+.recent-section-header h2,
+.capture-checklist-head strong,
+.capture-checklist-row-title strong,
+.exchange-heading strong,
+.entry-title-row strong,
+.endpoint-title,
+.overview-module-card strong,
+.notice-modal-body strong {
+  font-size: var(--type-title) !important;
+}
+
+small,
+caption,
+.meta,
+.sidebar-subtitle,
+.backend-status-body,
+.backend-status-body span,
+.backend-status-topline,
+.field-label > span,
+.field-help,
+.topbar-badges,
+.capture-badge,
+.status-toggle,
+.dashboard-ribbon-card span,
+.entry-title-row span,
+.exchange-heading span,
+.security-reason-title,
+.security-summary-pill,
+.owasp-chip,
+.chip,
+.endpoint-card span,
+.har-result-card span,
+.recent-card span,
+.stats-card span,
+.compare-metric-card span,
+.compare-metric-card small,
+.compare-run-head-card span,
+.compare-run-head-card small,
+.capture-checklist-row-confidence,
+.capture-checklist-card strong,
+.capture-checklist-card code {
+  font-size: var(--type-caption) !important;
 }

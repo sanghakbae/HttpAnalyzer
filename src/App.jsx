@@ -5506,6 +5506,18 @@ export default function App() {
     });
   }
 
+  async function handleTopbarGoogleLogin() {
+    setLoginFailureModal("");
+
+    try {
+      await handleGoogleLogin();
+    } catch (error) {
+      setLoginFailureModal(
+        error instanceof Error ? error.message : "Firebase Google 로그인에 실패했습니다."
+      );
+    }
+  }
+
   async function handleLogout() {
     setAuthUser(null);
     await signOutFirebaseUser().catch(() => null);
@@ -6180,17 +6192,6 @@ export default function App() {
     setRecentCapturePage((current) => Math.min(current, recentCapturePageCount));
   }, [recentCapturePageCount]);
 
-  if (!authUser) {
-    return (
-      <LoginScreen
-        onGoogleLogin={handleGoogleLogin}
-        onLocalDevLogin={handleLocalDevLogin}
-        firebaseReady={isFirebaseClientReady()}
-        loginLoading={authLoading}
-      />
-    );
-  }
-
   return (
     <main ref={appShellRef} className="page-shell">
       <div className={`app-layout ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
@@ -6293,14 +6294,16 @@ export default function App() {
           <section className="hero-card filter-shell">
             <div className="topbar">
               <div className="topbar-badges">
-                <div className="login-user-copy">
-                  {authUser.picture ? (
-                    <img src={authUser.picture} alt={authUser.name} className="user-avatar" />
-                  ) : null}
-                  <div>
-                    <span>{authUser.email}</span>
+                {authUser ? (
+                  <div className="login-user-copy">
+                    {authUser.picture ? (
+                      <img src={authUser.picture} alt={authUser.name} className="user-avatar" />
+                    ) : null}
+                    <div>
+                      <span>{authUser.email}</span>
+                    </div>
                   </div>
-                </div>
+                ) : null}
                 <span className={`capture-badge ${active ? "live" : ""}`}>
                   {active ? "LIVE" : "IDLE"}
                 </span>
@@ -6320,9 +6323,31 @@ export default function App() {
                   />
                   <span>Mask Secrets</span>
                 </label>
-                <button type="button" className="logout-button" onClick={handleLogout}>
-                  로그아웃
-                </button>
+                {authUser ? (
+                  <button type="button" className="logout-button" onClick={handleLogout}>
+                    로그아웃
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      className="logout-button"
+                      onClick={handleTopbarGoogleLogin}
+                      disabled={!isFirebaseClientReady() || authLoading}
+                    >
+                      {!isFirebaseClientReady()
+                        ? "Firebase 설정 필요"
+                        : authLoading
+                          ? "로그인 중..."
+                          : "Google 로그인"}
+                    </button>
+                    {isLocalRuntime() ? (
+                      <button type="button" className="logout-button" onClick={handleLocalDevLogin}>
+                        로컬 개발 로그인
+                      </button>
+                    ) : null}
+                  </>
+                )}
               </div>
             </div>
             <div className="dashboard-ribbon">
