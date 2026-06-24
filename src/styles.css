@@ -6292,6 +6292,17 @@ pre {
 
 .capture-control-panel {
   margin-top: 8px !important;
+  position: relative !important;
+  z-index: 80 !important;
+  overflow: visible !important;
+}
+
+.pair-list:has(.capture-control-panel),
+.panel.stacked-panel:has(.capture-control-panel),
+.capture-control-panel .capture-form {
+  position: relative !important;
+  z-index: 70 !important;
+  overflow: visible !important;
 }
 
 .capture-checklist-panel {

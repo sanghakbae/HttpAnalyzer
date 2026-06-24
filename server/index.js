@@ -1465,10 +1465,10 @@ async function loadRecentHarAnalyses(limit = 10) {
   return data.docs.map((document) => document.data());
 }
 
-const historyPageSize = 1000;
-const historyMaxRows = 5000;
+const recentCaptureEventsLimit = Number(process.env.RECENT_CAPTURE_EVENTS_LIMIT || 100);
+const recentInspectionRunsLimit = Number(process.env.RECENT_INSPECTION_RUNS_LIMIT || 100);
 
-async function loadRecentCaptureEvents(limit = 500) {
+async function loadRecentCaptureEvents(limit = recentCaptureEventsLimit) {
   if (!firestore) {
     return [];
   }
@@ -1482,57 +1482,18 @@ async function loadRecentCaptureEvents(limit = 500) {
   return data.docs.map((document) => document.data());
 }
 
-async function loadAllFirestoreRows(collectionName, orderColumn) {
+async function loadRecentInspectionRuns(limit = recentInspectionRunsLimit) {
   if (!firestore) {
     return [];
   }
 
-  const rows = [];
-  let cursor = null;
+  const snapshot = await firestore
+    .collection(firestoreCollectionNames.inspectionRuns)
+    .orderBy("created_at", "desc")
+    .limit(limit);
 
-  while (rows.length < historyMaxRows) {
-    let query = firestore
-      .collection(collectionName)
-      .orderBy(orderColumn, "desc")
-      .limit(historyPageSize);
-
-    if (cursor) {
-      query = query.startAfter(cursor);
-    }
-
-    const snapshot = await query.get();
-    if (snapshot.empty) {
-      break;
-    }
-
-    const pageRows = snapshot.docs.map((document) => document.data());
-    rows.push(...pageRows);
-    cursor = snapshot.docs[snapshot.docs.length - 1];
-
-    if (snapshot.docs.length < historyPageSize) {
-      break;
-    }
-  }
-
-  return rows.slice(0, historyMaxRows);
-}
-
-async function loadRecentInspectionRuns() {
-  if (!firestore) {
-    return [];
-  }
-
-  let remoteRuns = [];
-  try {
-    remoteRuns = await loadAllFirestoreRows(firestoreCollectionNames.inspectionRuns, "created_at");
-  } catch (error) {
-    console.warn(
-      "Inspection runs remote load failed; using local history:",
-      error instanceof Error ? error.message : String(error)
-    );
-  }
-
-  return remoteRuns;
+  const data = await snapshot.get();
+  return data.docs.map((document) => document.data());
 }
 
 function attachCaptureListeners(page, targetHost) {
@@ -2402,7 +2363,7 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
 app.get("/api/recent-analyses", async (_request, response) => {
   const [harAnalyses, captureEvents, inspectionRuns] = await Promise.allSettled([
     loadRecentHarAnalyses(10),
-    loadRecentCaptureEvents(500),
+    loadRecentCaptureEvents(),
     loadRecentInspectionRuns()
   ]);
 
