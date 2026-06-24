@@ -6119,22 +6119,22 @@ export default function App() {
     {
       key: "overview",
       icon: "overview",
-      label: "Overview",
+      label: "대시보드",
       description: "위험도와 요약 현황",
       count: allSecurityFindings.length
     },
     {
       key: "capture",
       icon: "capture",
-      label: "Capture",
+      label: "캡처",
       description: "실시간 캡처와 요청 목록",
       count: visibleExchanges.length
     },
     {
       key: "checklist",
       icon: "checklist",
-      label: "Vulnerability Checklist",
-      description: "취약점별 수동 점검 목록",
+      label: "취약점 점검",
+      description: "취약점별 수동 점검",
       count:
         allSecurityFindings.length > 0
           ? new Set(allSecurityFindings.map((finding) => getChecklistCategoryKey(finding.key))).size
@@ -6143,7 +6143,7 @@ export default function App() {
     {
       key: "findings",
       icon: "findings",
-      label: "Findings",
+      label: "보안 이슈",
       description: "탐지된 보안 이슈",
       count: findingEntries.length
     },
@@ -6151,42 +6151,42 @@ export default function App() {
       key: "har",
       icon: "har",
       label: "HAR",
-      description: "파일 업로드와 분석 결과",
+      description: "파일 업로드와 분석",
       count: mergedHarHistory.length
     },
     {
       key: "recent",
       icon: "recent",
-      label: "Recent Data",
+      label: "최근 데이터",
       description: "스캔 도메인 목록",
       count: domainHistoryRuns.length
     },
     {
       key: "compare",
       icon: "recent",
-      label: "Compare Runs",
-      description: "동일 사이트 점검 이력 비교",
+      label: "이력 비교",
+      description: "동일 사이트 점검 비교",
       count: compareRuns.length
     },
     {
       key: "sqlmap",
       icon: "sqlmap",
       label: "SQLMap",
-      description: "SQL Injection 자동 점검",
+      description: "SQL Injection 점검",
       count: sqlmapResult ? 1 : 0
     },
     {
       key: "api-test",
       icon: "api",
-      label: "API Test",
+      label: "API 테스트",
       description: "API 요청 테스트",
       count: apiCapturedExchanges.length
     },
     {
       key: "settings",
       icon: "settings",
-      label: "Settings",
-      description: "OpenAI Summary 설정",
+      label: "설정",
+      description: "OpenAI 요약 설정",
       count: openAiSummaryReady ? 1 : 0
     }
   ].filter((item) => !readOnlyDeployment || !["capture", "har", "sqlmap", "api-test"].includes(item.key));
