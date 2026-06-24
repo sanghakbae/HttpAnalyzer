@@ -27,8 +27,6 @@
 - `HTML / PDF / JSON / Markdown / CSV` 리포트 출력
 - HAR 분석 결과, 실시간 캡처 이벤트, 점검 이력을 Firebase Firestore에 저장
 - 업로드된 HAR 원본 파일을 Cloudflare R2에 저장
-- 서버 저장 실패 시 `Recent Data` 로컬 fallback 저장
-- 로컬 fallback 항목의 자동 재업로드 큐
 
 ## 현재 UI에서 지원하는 보안 분석
 
@@ -134,6 +132,7 @@ HOST=127.0.0.1
 DISABLE_CAPTURE=false
 DISABLE_SQLMAP=false
 SQLMAP_BIN=sqlmap
+OPENAI_API_KEY=<server-side-openai-api-key>
 PLAYWRIGHT_HEADLESS=true
 CAPTURE_READY_DELAY_MS=3000
 CAPTURE_IDLE_AUTO_STOP_MS=10000
@@ -301,10 +300,11 @@ npm run dev
 ### OpenAI Summary Settings
 
 `Settings` 메뉴에서 크롤링 완료 후 자동 생성할 Summary 설정을 관리합니다.
+서버 환경변수 `OPENAI_API_KEY`를 설정하면 브라우저에 키를 입력하지 않아도 서버 키로 Summary를 생성합니다.
 
 입력 항목:
 
-- `OPENAI KEY`: OpenAI API Key입니다. 서버 DB에는 저장하지 않고 현재 브라우저 상태에서만 사용합니다.
+- `OPENAI KEY`: 선택 입력입니다. 서버 `OPENAI_API_KEY`가 없을 때만 브라우저 localStorage 키로 Summary를 생성합니다.
 - `MODEL`: Summary 생성에 사용할 모델명입니다. 기본값은 `gpt-4.1-mini`입니다.
 - `PROMPT`: HTTP 캡처 결과를 어떤 관점으로 요약할지 정하는 프롬프트입니다.
 
@@ -343,14 +343,13 @@ npm run dev
 - 최근 7일 / 30일 기준 통계 대시보드
 - 점검 이력 상세 모달
 - 점검 이력별 `HTML / PDF` 리포트 재다운로드
-- 항목별 저장 출처(`DB`, `로컬`, `로컬(대기)`)
+- 항목별 저장 출처(`DB`)
 
 중요:
 
-- DB 저장이 실패해도 `Recent Data`에는 로컬 fallback으로 즉시 표시됩니다.
-- `로컬(대기)`는 아직 DB 동기화가 안 된 항목입니다.
-- 앱이 다시 열리거나 주기 동기화가 돌 때 서버가 정상이면 자동으로 재업로드를 시도합니다.
-- 재업로드가 성공하면 로컬 대기 항목은 제거되고 DB 이력만 남습니다.
+- 캡처 결과는 Firebase/Firestore DB 저장이 성공해야 `Recent Data`에 표시됩니다.
+- DB 저장이 실패하면 로컬 대기 항목으로 표시하지 않고 저장 실패 메시지를 보여줍니다.
+- 서버 Firestore 인증 또는 Firebase 클라이언트 설정이 필요합니다.
 
 ## Firebase / Cloudflare 저장 구조
 
@@ -554,13 +553,13 @@ finding이 많이 몰린 엔드포인트를 우선순위로 정리합니다.
 
 ### Recent Data 저장 정책
 
-최근 점검 이력과 캡처 이벤트는 두 단계로 관리합니다.
+최근 점검 이력과 캡처 이벤트는 DB 저장 성공 기준으로 관리합니다.
 
-- 1차: 로컬 브라우저 저장
-- 2차: Firebase Firestore 저장
+- 1차: 서버 Firestore 저장
+- 2차: 서버 Firestore 인증이 없을 때 Firebase 클라이언트 Firestore 저장
 - 3차: HAR 원본/첨부 파일은 Cloudflare R2 저장
 
-저장 실패 시에도 사용자는 `Recent Data`에서 바로 이력을 볼 수 있어야 하므로, 캡처 종료 시점에 먼저 로컬 fallback을 기록합니다. 이후 백엔드가 정상 응답하면 자동 재업로드 큐가 Firestore 저장을 다시 시도합니다. 백엔드가 내려가 있어도 Firebase 클라이언트가 준비되어 있으면 브라우저에서 직접 Firestore 저장을 시도합니다.
+DB 저장이 실패하면 `Recent Data`에 로컬 대기 항목을 만들지 않고 저장 실패 메시지를 보여줍니다. `Recent Data`에는 Firestore에서 확인된 이력만 표시합니다.
 
 ## 개발 팁
 

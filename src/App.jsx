@@ -3207,8 +3207,8 @@ export default function App() {
   const [harUploadResult, setHarUploadResult] = useState(null);
   const [harUploadError, setHarUploadError] = useState("");
   const [localHarHistory, setLocalHarHistory] = useState(() => getStoredHarHistory());
-  const [localInspectionRuns, setLocalInspectionRuns] = useState(() => getStoredInspectionRuns());
-  const [localCaptureEvents, setLocalCaptureEvents] = useState(() => getStoredCaptureEvents());
+  const [localInspectionRuns, setLocalInspectionRuns] = useState([]);
+  const [localCaptureEvents, setLocalCaptureEvents] = useState([]);
   const [localAiSummaries, setLocalAiSummaries] = useState(() => getStoredAiSummaries());
   const [selectedHarHistoryKey, setSelectedHarHistoryKey] = useState("");
   const [recentHarAnalyses, setRecentHarAnalyses] = useState([]);
@@ -3229,7 +3229,8 @@ export default function App() {
     databaseProvider: "",
     objectStorageConfigured: false,
     objectStorageProvider: "",
-    captureDisabled: null
+    captureDisabled: null,
+    openAiSummaryConfigured: false
   });
   const [captureMermaidModal, setCaptureMermaidModal] = useState("");
   const [focusedFindingExchangeId, setFocusedFindingExchangeId] = useState("");
@@ -3327,21 +3328,8 @@ export default function App() {
   }, []);
 
   const mergedInspectionRuns = useMemo(
-    () => [
-      ...localInspectionRuns.map((item) => ({ ...item, historySource: "local" })),
-      ...recentInspectionRuns
-        .map((item) => ({ ...item, historySource: "db" }))
-        .filter(
-          (item) =>
-            !localInspectionRuns.some(
-              (localItem) =>
-                (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
-                (localItem.target_url || "") === (item.target_url || "") &&
-                (localItem.ended_at || "") === (item.ended_at || "")
-            )
-        )
-    ],
-    [localInspectionRuns, recentInspectionRuns]
+    () => recentInspectionRuns.map((item) => ({ ...item, historySource: "db" })),
+    [recentInspectionRuns]
   );
   const domainHistoryRuns = useMemo(
     () => buildDomainHistoryRuns(mergedInspectionRuns),
@@ -3399,21 +3387,8 @@ export default function App() {
 
   const mergedCaptureEvents = useMemo(
     () =>
-      [
-        ...localCaptureEvents.map((item) => ({ ...item, historySource: "local" })),
-        ...recentCaptureEvents
-          .map((item) => ({ ...item, historySource: "db" }))
-          .filter(
-            (item) =>
-              !localCaptureEvents.some(
-                (localItem) =>
-                  (localItem.capture_session_id || "") === (item.capture_session_id || "") &&
-                  (localItem.request_url || "") === (item.request_url || "") &&
-                  (localItem.created_at || "") === (item.created_at || "")
-              )
-          )
-      ].filter((item) => !isAbortedErrorText(item.error_text)),
-    [localCaptureEvents, recentCaptureEvents]
+      recentCaptureEvents.map((item) => ({ ...item, historySource: "db" })).filter((item) => !isAbortedErrorText(item.error_text)),
+    [recentCaptureEvents]
   );
   const normalizedHarHistory = useMemo(
     () =>
@@ -3634,7 +3609,8 @@ export default function App() {
           objectStorageConfigured: Boolean(data?.objectStorageConfigured),
           objectStorageProvider: data?.objectStorageProvider || "",
           captureDisabled:
-            typeof data?.captureDisabled === "boolean" ? data.captureDisabled : null
+            typeof data?.captureDisabled === "boolean" ? data.captureDisabled : null,
+          openAiSummaryConfigured: Boolean(data?.openAiSummaryConfigured)
         });
       } catch (error) {
         if (cancelled) {
@@ -3651,7 +3627,8 @@ export default function App() {
           databaseProvider: "",
           objectStorageConfigured: false,
           objectStorageProvider: "",
-          captureDisabled: null
+          captureDisabled: null,
+          openAiSummaryConfigured: false
         });
       }
     };
@@ -3744,32 +3721,37 @@ export default function App() {
           setStatusMessage(autoStopMessage);
 
           if (["crawl-complete", "idle", "crawl-error", "browser-closed"].includes(data.stopReason)) {
-            const endedAt = data.stoppedAt || new Date().toISOString();
-            const captureInput = {
-              targetUrl: data.targetUrl,
-              sessionId: data.sessionId,
-              exchanges: data.exchanges || [],
-              errors: data.errors || []
-            };
-            const snapshot = buildInspectionSnapshotFromCapture(captureInput, {
-              startedAt: data.startedAt,
-              endedAt
-            });
-            const localRun = await persistInspectionRunFromSnapshot(snapshot, captureInput, data.sessionId, {
-              startedAt: data.startedAt,
-              endedAt
-            });
-            void localRun;
-            const localEvents = buildLocalCaptureEventsFromExchanges(
-              captureInput.exchanges || [],
-              endedAt,
-              data.sessionId,
-              data.targetUrl
-            );
-            setLocalCaptureEvents((current) =>
-              [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 400)
-            );
-            void refreshRecentAnalysesOnce().catch(() => null);
+            try {
+              const endedAt = data.stoppedAt || new Date().toISOString();
+              const captureInput = {
+                targetUrl: data.targetUrl,
+                sessionId: data.sessionId,
+                exchanges: data.exchanges || [],
+                errors: data.errors || []
+              };
+              const snapshot = buildInspectionSnapshotFromCapture(captureInput, {
+                startedAt: data.startedAt,
+                endedAt
+              });
+              const savedRun = await persistInspectionRunFromSnapshot(snapshot, captureInput, data.sessionId, {
+                startedAt: data.startedAt,
+                endedAt
+              });
+              void savedRun;
+              const localEvents = buildLocalCaptureEventsFromExchanges(
+                captureInput.exchanges || [],
+                endedAt,
+                data.sessionId,
+                data.targetUrl
+              );
+              await saveCaptureEventsToDatabase(localEvents);
+              void refreshRecentAnalysesOnce().catch(() => null);
+            } catch (saveError) {
+              setStatusMessage(
+                saveError instanceof Error ? saveError.message : "캡처 결과 DB 저장에 실패했습니다."
+              );
+              return;
+            }
           }
 
           await refreshRecentAnalysesOnce().catch(() => null);
@@ -3842,107 +3824,13 @@ export default function App() {
         return;
       }
 
-      const pendingRuns = localInspectionRuns.filter((item) => item.pending_sync);
-      const pendingEvents = localCaptureEvents.filter((item) => item.pending_sync);
       const pendingSummaries = localAiSummaries.filter((item) => item.pending_sync);
 
-      if (pendingRuns.length === 0 && pendingEvents.length === 0 && pendingSummaries.length === 0) {
+      if (pendingSummaries.length === 0) {
         return;
       }
 
       try {
-        for (const run of pendingRuns) {
-          const payload = {
-            capture_session_id: run.capture_session_id ?? null,
-            target_url: run.target_url,
-            started_at: run.started_at ?? null,
-            ended_at: run.ended_at ?? null,
-            total_exchanges: run.total_exchanges ?? 0,
-            total_errors: run.total_errors ?? 0,
-            total_findings: run.total_findings ?? 0,
-            critical_findings: run.critical_findings ?? 0,
-            high_findings: run.high_findings ?? 0,
-            security_only: Boolean(run.security_only),
-            mask_sensitive: Boolean(run.mask_sensitive),
-            excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
-            owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
-            endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
-            report_snapshot:
-              run.report_snapshot && typeof run.report_snapshot === "object"
-                ? run.report_snapshot
-                : {}
-          };
-
-          let saved = false;
-
-          try {
-            const response = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            });
-            saved = response.ok;
-          } catch {
-            saved = false;
-          }
-
-          if (!saved && isFirebaseClientReady()) {
-            const firebaseResult = await saveInspectionRunToFirebase(payload).catch(() => ({ saved: false }));
-            saved = Boolean(firebaseResult?.saved);
-          }
-
-          if (saved) {
-            setLocalInspectionRuns((current) => current.filter((item) => item.id !== run.id));
-          }
-        }
-
-        if (pendingEvents.length > 0) {
-          const payload = {
-            events: pendingEvents.map((item) => ({
-              capture_session_id: item.capture_session_id ?? null,
-              target_url: item.target_url ?? null,
-              request_timestamp: item.request_timestamp ?? item.created_at ?? null,
-              request_method: item.request_method ?? null,
-              request_url: item.request_url ?? null,
-              request_resource_type: item.request_resource_type ?? null,
-              request_headers: item.request_headers ?? {},
-              request_body: item.request_body ?? "",
-              response_timestamp: item.response_timestamp ?? null,
-              response_url: item.response_url ?? null,
-              response_status: item.response_status ?? null,
-              response_status_text: item.response_status_text ?? null,
-              response_headers: item.response_headers ?? {},
-              response_body_preview: item.response_body_preview ?? "",
-              error_text: item.error_text ?? null,
-              created_at: item.created_at ?? null,
-              id: item.id || ""
-            }))
-          };
-
-          let saved = false;
-
-          try {
-            const response = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(payload)
-            });
-            saved = response.ok;
-          } catch {
-            saved = false;
-          }
-
-          if (!saved && isFirebaseClientReady()) {
-            const firebaseResult = await saveCaptureEventsToFirebase(payload.events).catch(() => ({ saved: false }));
-            saved = Boolean(firebaseResult?.saved);
-          }
-
-          if (saved) {
-            const syncedIds = new Set(pendingEvents.map((item) => item.id));
-            setLocalCaptureEvents((current) => current.filter((item) => !syncedIds.has(item.id)));
-          }
-        }
-
         for (const summary of pendingSummaries) {
           await syncAiSummaryRecord(summary, { refreshRecent: false });
         }
@@ -3954,7 +3842,7 @@ export default function App() {
     syncLocalQueue();
     const timer = window.setInterval(syncLocalQueue, 15000);
     return () => window.clearInterval(timer);
-  }, [localInspectionRuns, localCaptureEvents, localAiSummaries, readOnlyDeployment]);
+  }, [localAiSummaries, readOnlyDeployment]);
 
   useEffect(() => {
     if (!readOnlyDeployment) {
@@ -3989,6 +3877,11 @@ export default function App() {
   useEffect(() => {
     setStoredValue("http-analyzer-active-section", activeSection);
   }, [activeSection]);
+
+  useEffect(() => {
+    setStoredValue(LOCAL_INSPECTION_RUNS_KEY, "");
+    setStoredValue(LOCAL_CAPTURE_EVENTS_KEY, "");
+  }, []);
 
   useEffect(() => {
     setStoredValue(
@@ -4074,6 +3967,97 @@ export default function App() {
     setRecentHarAnalyses(Array.isArray(data.harAnalyses) ? data.harAnalyses : []);
     setRecentCaptureEvents(Array.isArray(data.captureEvents) ? data.captureEvents : []);
     setRecentInspectionRuns(Array.isArray(data.inspectionRuns) ? data.inspectionRuns : []);
+  }
+
+  async function saveInspectionRunToDatabase(run) {
+    const payload = {
+      capture_session_id: run.capture_session_id ?? null,
+      target_url: run.target_url,
+      started_at: run.started_at ?? null,
+      ended_at: run.ended_at ?? null,
+      total_exchanges: run.total_exchanges ?? 0,
+      total_errors: run.total_errors ?? 0,
+      total_findings: run.total_findings ?? 0,
+      critical_findings: run.critical_findings ?? 0,
+      high_findings: run.high_findings ?? 0,
+      security_only: Boolean(run.security_only),
+      mask_sensitive: Boolean(run.mask_sensitive),
+      excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
+      owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
+      endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
+      report_snapshot: run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {}
+    };
+
+    let lastReason = "";
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/inspection-runs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const { data, rawText } = await readJsonSafely(response);
+      if (response.ok && data?.saved !== false) {
+        return { ...run, ...(data?.id ? { id: data.id } : {}), pending_sync: false };
+      }
+      lastReason = data?.reason || data?.error || rawText || `HTTP ${response.status}`;
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : "Backend DB save failed.";
+    }
+
+    if (isFirebaseClientReady()) {
+      const firebaseResult = await saveInspectionRunToFirebase(payload).catch((error) => ({
+        saved: false,
+        reason: error instanceof Error ? error.message : "Firebase save failed."
+      }));
+      if (firebaseResult?.saved) {
+        return { ...run, ...(firebaseResult.id ? { id: firebaseResult.id } : {}), pending_sync: false };
+      }
+      lastReason = firebaseResult?.reason || lastReason;
+    }
+
+    throw new Error(`DB 저장 실패: ${lastReason || "Firebase/Firestore 설정을 확인해주세요."}`);
+  }
+
+  async function saveCaptureEventsToDatabase(events) {
+    const validEvents = (Array.isArray(events) ? events : []).filter(
+      (item) => item && item.request_url && !isAbortedErrorText(item.error_text)
+    );
+
+    if (validEvents.length === 0) {
+      return { saved: true, count: 0 };
+    }
+
+    const payload = { events: validEvents };
+    let lastReason = "";
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/capture-events/batch`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const { data, rawText } = await readJsonSafely(response);
+      if (response.ok && data?.saved !== false) {
+        return data || { saved: true };
+      }
+      lastReason = data?.reason || data?.error || rawText || `HTTP ${response.status}`;
+    } catch (error) {
+      lastReason = error instanceof Error ? error.message : "Backend capture event save failed.";
+    }
+
+    if (isFirebaseClientReady()) {
+      const firebaseResult = await saveCaptureEventsToFirebase(validEvents).catch((error) => ({
+        saved: false,
+        reason: error instanceof Error ? error.message : "Firebase event save failed."
+      }));
+      if (firebaseResult?.saved) {
+        return firebaseResult;
+      }
+      lastReason = firebaseResult?.reason || lastReason;
+    }
+
+    throw new Error(`DB 요청 이력 저장 실패: ${lastReason || "Firebase/Firestore 설정을 확인해주세요."}`);
   }
 
   async function syncAiSummaryRecord(summaryRecord, options = {}) {
@@ -4188,7 +4172,9 @@ export default function App() {
   }
 
   async function requestOpenAiSummary(captureInput, summaryContext = {}) {
-    if (!openAiKey.trim()) {
+    const clientOpenAiKey = openAiKey.trim();
+
+    if (!clientOpenAiKey && !backendHealth.openAiSummaryConfigured) {
       setAiSummaryError("OpenAI API Key가 없어 Summary를 생성하지 않았습니다.");
       return "";
     }
@@ -4201,7 +4187,7 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          apiKey: openAiKey.trim(),
+          apiKey: clientOpenAiKey,
           model: openAiModel.trim() || "gpt-4.1-mini",
           prompt: openAiPrompt,
           capture: captureInput
@@ -4350,7 +4336,7 @@ export default function App() {
     const localRun = {
       id: `local-run-${Date.now()}`,
       created_at: endedAt,
-      pending_sync: true,
+      pending_sync: false,
       capture_session_id: runSessionId || null,
       target_url: targetUrl,
       started_at: meta.startedAt || captureStartedAt || null,
@@ -4368,9 +4354,24 @@ export default function App() {
       report_snapshot: snapshot
     };
 
-    setLocalInspectionRuns((current) => [localRun, ...current]);
+    const savedRun = await saveInspectionRunToDatabase(localRun);
+    setRecentInspectionRuns((current) =>
+      sortRecentRows(
+        dedupeRecentRows(
+          [savedRun, ...current],
+          (item) =>
+            String(
+              item.id ||
+                `${item.capture_session_id || ""}:${item.target_url || ""}:${
+                  item.ended_at || item.created_at || ""
+                }`
+            )
+        ),
+        (item) => item.created_at || item.ended_at
+      )
+    );
 
-    return localRun;
+    return savedRun;
   }
 
   function buildLocalCaptureEventsFromExchanges(rawExchanges = [], endedAt, sessionId, targetUrl) {
@@ -4381,7 +4382,7 @@ export default function App() {
       .map((exchange, index) => ({
         id: `local-event-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
         created_at: exchange.timestamp || endedAt,
-        pending_sync: true,
+        pending_sync: false,
         capture_session_id: sessionId || null,
         target_url: targetUrl || "unknown",
         request_method: exchange.request?.method || "?",
@@ -4647,7 +4648,7 @@ export default function App() {
           ? selectedCaptureMode === "manual"
             ? "새창 수동 캡처가 시작되었습니다. 열린 창에서 직접 이동하면 요청/응답이 캡처됩니다."
             : ""
-          : "캡처 창을 열었습니다. 현재 DB가 연결되지 않아 결과는 localStorage에 임시 보관되며, Firebase 연결 후 자동 동기화됩니다."
+          : "캡처가 시작되었습니다. 종료 시 Firebase DB 저장을 시도합니다."
       );
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
@@ -4702,7 +4703,7 @@ export default function App() {
       const localRun = {
         id: `local-run-${Date.now()}`,
         created_at: endedAt,
-        pending_sync: true,
+        pending_sync: false,
         capture_session_id: captureSessionId || null,
         target_url: domain || getStoredValue("http-analyzer-domain") || "unknown",
         started_at: captureStartedAt || null,
@@ -4726,9 +4727,37 @@ export default function App() {
         domain || getStoredValue("http-analyzer-domain") || "unknown"
       );
 
-      setLocalInspectionRuns((current) => [localRun, ...current]);
-      setLocalCaptureEvents((current) =>
-        [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)).slice(0, 40)
+      const savedRun = await saveInspectionRunToDatabase(localRun);
+      await saveCaptureEventsToDatabase(localEvents);
+      setRecentInspectionRuns((current) =>
+        sortRecentRows(
+          dedupeRecentRows(
+            [savedRun, ...current],
+            (item) =>
+              String(
+                item.id ||
+                  `${item.capture_session_id || ""}:${item.target_url || ""}:${
+                    item.ended_at || item.created_at || ""
+                  }`
+              )
+          ),
+          (item) => item.created_at || item.ended_at
+        )
+      );
+      setRecentCaptureEvents((current) =>
+        sortRecentRows(
+          dedupeRecentRows(
+            [...localEvents, ...current].filter((item) => !isAbortedErrorText(item.error_text)),
+            (item) =>
+              String(
+                item.id ||
+                  `${item.capture_session_id || ""}:${item.request_url || ""}:${
+                    item.request_timestamp || item.created_at || ""
+                  }`
+              )
+          ),
+          (item) => item.created_at || item.request_timestamp
+        ).slice(0, 400)
       );
       setErrors((current) => current.filter((item) => !isAbortedErrorText(item.errorText)));
 
@@ -4980,6 +5009,7 @@ export default function App() {
         return `
           <section class="pair-card">
             <div class="pair-index">#${index + 1}</div>
+            ${findingsHtml}
             <div class="pair-grid">
               <article class="box request">
                 <div class="chip request-chip">REQUEST</div>
@@ -4998,7 +5028,6 @@ export default function App() {
                 }`)}</pre>
               </article>
             </div>
-            ${findingsHtml}
           </section>
         `;
       })
@@ -5244,6 +5273,17 @@ export default function App() {
 
       reportExchanges.forEach((exchange, index) => {
         lines.push("", `Exchange #${index + 1}`);
+        if (Array.isArray(exchange.securityFindings) && exchange.securityFindings.length > 0) {
+          lines.push("Security Findings:");
+          exchange.securityFindings.forEach((finding) => {
+            lines.push(
+              `- [${finding.severityLabel}] ${finding.title} | ${finding.owaspLabel} | Evidence: ${finding.evidence}`
+            );
+          });
+        } else {
+          lines.push("Security Findings:");
+          lines.push("- No findings");
+        }
         lines.push(`Request: ${exchange.request?.method || "-"} ${exchange.request?.url || "-"}`);
         lines.push(`Resource: ${exchange.request?.resourceType || "-"}`);
         lines.push(`Captured At: ${exchange.timestamp || "-"}`);
@@ -5256,15 +5296,6 @@ export default function App() {
         lines.push(prettyJson(exchange.response?.headers || {}));
         lines.push("Response Body Preview:");
         lines.push(exchange.response?.bodyPreview || "(binary, empty, or pending)");
-
-        if (Array.isArray(exchange.securityFindings) && exchange.securityFindings.length > 0) {
-          lines.push("Security Findings:");
-          exchange.securityFindings.forEach((finding) => {
-            lines.push(
-              `- [${finding.severityLabel}] ${finding.title} | ${finding.owaspLabel} | Evidence: ${finding.evidence}`
-            );
-          });
-        }
       });
 
       const normalizedLines = lines.flatMap((line) => {
@@ -6030,6 +6061,12 @@ export default function App() {
     localInspectionRuns.filter((item) => item.pending_sync).length +
     localCaptureEvents.filter((item) => item.pending_sync).length +
     localAiSummaries.filter((item) => item.pending_sync).length;
+  const openAiSummaryReady = Boolean(openAiKey.trim() || backendHealth.openAiSummaryConfigured);
+  const openAiSummarySource = openAiKey.trim()
+    ? "Browser key"
+    : backendHealth.openAiSummaryConfigured
+      ? "Server key"
+      : "OpenAI empty";
   const overviewModuleCards = [
     {
       key: "capture",
@@ -6092,9 +6129,9 @@ export default function App() {
     {
       key: "settings",
       label: "Settings",
-      value: openAiKey ? "OpenAI set" : "OpenAI empty",
+      value: openAiSummaryReady ? "OpenAI set" : "OpenAI empty",
       meta: backendHealth.ok ? "Backend online" : "Backend issue",
-      detail: pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending local sync` : "Local queue synced",
+      detail: pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending summary sync` : openAiSummarySource,
       action: "설정 보기"
     }
   ];
@@ -6170,7 +6207,7 @@ export default function App() {
       icon: "settings",
       label: "Settings",
       description: "OpenAI Summary 설정",
-      count: openAiKey ? 1 : 0
+      count: openAiSummaryReady ? 1 : 0
     }
   ].filter((item) => !readOnlyDeployment || !["capture", "har", "sqlmap", "api-test"].includes(item.key));
 
@@ -6254,7 +6291,14 @@ export default function App() {
                 <strong>Capture</strong>
                 <span>{captureStateLabel}</span>
               </div>
-              <div className="capture-progress-track" aria-label="capture progress">
+              <div
+                className="capture-progress-track"
+                role="progressbar"
+                aria-label="capture progress"
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round(captureProgressPercent)}
+              >
                 <span
                   className={active ? "active" : ""}
                   style={{ width: `${captureProgressPercent}%` }}
@@ -6829,11 +6873,7 @@ export default function App() {
                                   <span>최근 스캔 {formatDateTime(item.ended_at || item.created_at)}</span>
                                   <span>스캔 {item.scanCount || 1}회</span>
                                   <span>
-                                    {item.historySource === "local"
-                                      ? item.pending_sync
-                                        ? "로컬(대기)"
-                                        : "로컬"
-                                      : "DB"}
+                                    DB
                                   </span>
                                   <span>세션 {item.capture_session_id || "-"}</span>
                                 </div>
@@ -7389,8 +7429,11 @@ export default function App() {
                 <div className="tool-panel section-panel">
                   <strong>OpenAI Summary Settings</strong>
                   <p className="tool-copy">
-                    캡처가 자동 완료되거나 `캡처 중지`로 종료되면 아래 설정으로 HTTP Summary를 자동 생성합니다. API Key는 이 브라우저의 localStorage에만 보관하고 서버/DB에는 저장하지 않습니다.
+                    캡처가 자동 완료되거나 `캡처 중지`로 종료되면 HTTP Summary를 자동 생성합니다. 서버에 OPENAI_API_KEY가 있으면 그 값을 사용하고, 아래 API Key는 이 브라우저의 localStorage에만 보관합니다.
                   </p>
+                  {backendHealth.openAiSummaryConfigured ? (
+                    <div className="info-strip">서버 OPENAI_API_KEY가 설정되어 있습니다.</div>
+                  ) : null}
                   <div className="tool-grid-2">
                     <label className="field-label field-card">
                       <span>OPENAI KEY</span>
@@ -7423,7 +7466,7 @@ export default function App() {
                   <div className="action-row">
                     <button
                       type="button"
-                      disabled={aiSummaryLoading || !openAiKey.trim()}
+                      disabled={aiSummaryLoading || !openAiSummaryReady}
                       onClick={() =>
                         requestOpenAiSummary(
                           {

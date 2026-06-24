@@ -43,6 +43,7 @@ const firebaseServiceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
 const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
 const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
 const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY;
+const openAiApiKey = process.env.OPENAI_API_KEY || "";
 const r2AccountId = process.env.CLOUDFLARE_R2_ACCOUNT_ID;
 const r2AccessKeyId = process.env.CLOUDFLARE_R2_ACCESS_KEY_ID;
 const r2SecretAccessKey = process.env.CLOUDFLARE_R2_SECRET_ACCESS_KEY;
@@ -1742,21 +1743,26 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
   await closeCaptureBrowser();
   resetCaptureCollections();
 
+  const launchArgs = ["--no-sandbox", "--disable-dev-shm-usage"];
+
+  if (captureMode === "manual") {
+    launchArgs.push("--start-maximized");
+  } else {
+    launchArgs.push(`--window-size=${popupWidth},${popupHeight}`, `--window-position=${windowX},${windowY}`);
+  }
+
   const launchOptions = {
     headless: launchHeadless,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      `--window-size=${popupWidth},${popupHeight}`,
-      `--window-position=${windowX},${windowY}`
-    ]
+    args: launchArgs
   };
+
+  if (existsSync(chromeExecutablePath)) {
+    launchOptions.executablePath = chromeExecutablePath;
+  }
 
   if (captureMode === "manual") {
     launchOptions.ignoreDefaultArgs = ["--no-startup-window"];
-    if (existsSync(chromeExecutablePath)) {
-      launchOptions.executablePath = chromeExecutablePath;
-    } else {
+    if (!launchOptions.executablePath) {
       launchOptions.channel = "chrome";
     }
   }
@@ -1765,7 +1771,7 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
 
   const context = await browser.newContext({
     acceptDownloads: true,
-    viewport: {
+    viewport: captureMode === "manual" ? null : {
       width: popupWidth,
       height: popupHeight - 96
     }
@@ -2048,6 +2054,7 @@ app.get("/api/health", (_request, response) => {
     captureCrawlMaxPages,
     captureCrawlPageDelayMs,
     captureLoginWaitMs,
+    openAiSummaryConfigured: Boolean(openAiApiKey),
     sqlmapDisabled: disableSqlmap,
     sqlmapBin
   });
@@ -2270,12 +2277,12 @@ app.post("/api/sqlmap/scan", async (request, response) => {
 
 app.post("/api/openai/summary", async (request, response) => {
   const { apiKey, model, prompt, capture } = request.body ?? {};
-  const key = String(apiKey || "").trim();
+  const key = String(apiKey || openAiApiKey).trim();
   const selectedModel = String(model || "gpt-4.1-mini").trim();
   const userPrompt = String(prompt || "").trim();
 
   if (!key) {
-    response.status(400).json({ error: "OpenAI API key is required." });
+    response.status(400).json({ error: "OpenAI API Key를 설정해주세요." });
     return;
   }
 

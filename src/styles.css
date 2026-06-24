@@ -920,6 +920,16 @@ button:disabled {
   font-size: 12px;
 }
 
+.info-strip {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 5px;
+  background: #e8f3f6;
+  color: #15566b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .pair-list {
   display: flex;
   flex: 1 1 auto;
@@ -2113,7 +2123,7 @@ button:disabled {
 .severity-chip {
   display: inline-flex;
   align-items: center;
-  padding: 4px 8px;
+  padding: 2px 8px;
   border-radius: 5px;
   font-size: 0.72rem;
   font-weight: 800;
@@ -6072,6 +6082,7 @@ pre {
 .empty-copy,
 .status,
 .error-strip,
+.info-strip,
 .notice,
 .status-message {
   font-size: 14px !important;
@@ -6356,6 +6367,8 @@ pre {
   right: var(--page-right-inset) !important;
   z-index: 20 !important;
   box-sizing: border-box !important;
+  margin: 0 !important;
+  padding: 0 !important;
   width: max-content !important;
   max-width: calc(100% - (var(--page-right-inset) * 2)) !important;
 }
@@ -6372,7 +6385,36 @@ pre {
 
 .field-card,
 .capture-control-panel .field-card {
+  display: grid !important;
+  gap: 8px !important;
+  padding: 15px !important;
+  box-sizing: border-box !important;
+  overflow: visible !important;
+}
+
+.field-label.field-card > span,
+.field-card > span,
+.capture-control-panel .field-label > span {
+  min-height: auto !important;
   padding: 0 !important;
+  line-height: 1.2 !important;
+}
+
+.field-label.field-card > input,
+.field-label.field-card > select,
+.field-label.field-card > textarea,
+.field-card input,
+.field-card select,
+.field-card textarea {
+  width: 100% !important;
+  min-height: 34px !important;
+  padding: 8px 10px !important;
+  box-sizing: border-box !important;
+  border-radius: 5px !important;
+}
+
+.recent-capture-panel {
+  padding: 15px !important;
 }
 
 .action-row.action-card,
@@ -6407,12 +6449,21 @@ pre {
 .empty-copy,
 .status,
 .error-strip,
+.info-strip,
 .notice,
 .status-message,
 .capture-checklist-row-cell p,
 .capture-checklist-row-cell li,
 .capture-checklist-row-cell code {
   font-size: 14px !important;
+}
+
+.inspection-run-item {
+  padding: 15px !important;
+}
+
+.inspection-run-item > .inspection-run-row {
+  padding: 0 !important;
 }
 
 .dashboard-ribbon-label,
