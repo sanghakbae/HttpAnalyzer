@@ -4032,7 +4032,8 @@ button,
 }
 
 .capture-checklist-row-cell ul {
-  padding-left: 18px;
+  padding-left: 0;
+  list-style: none;
 }
 
 .capture-checklist-row-cell code {
