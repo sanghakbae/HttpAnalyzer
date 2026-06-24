@@ -6269,7 +6269,9 @@ export default function App() {
             <div className="capture-progress-panel">
               <div className="capture-progress-topline">
                 <strong>Capture</strong>
-                <span>{captureStateLabel}</span>
+                <span className={`capture-progress-state state-${captureStateLabel}`}>
+                  {captureStateLabel}
+                </span>
               </div>
               <div
                 className="capture-progress-track"
@@ -6284,14 +6286,29 @@ export default function App() {
                   style={{ width: `${captureProgressPercent}%` }}
                 />
               </div>
-              <div className="capture-progress-meta">
-                <span>{capturedCount} captured</span>
-                <span>{totalCapturedCount} total</span>
-                <span>
-                  {crawledPageCount}/{captureMeta.crawlMaxPages || "-"} pages
-                </span>
-                <span>login {loginStateLabel}</span>
-                <span>{captureErrorCount} errors</span>
+              <div className="capture-progress-stats">
+                <div>
+                  <span>Captured</span>
+                  <strong>{capturedCount}</strong>
+                </div>
+                <div>
+                  <span>Total</span>
+                  <strong>{totalCapturedCount}</strong>
+                </div>
+                <div>
+                  <span>Pages</span>
+                  <strong>
+                    {crawledPageCount}/{captureMeta.crawlMaxPages || "-"}
+                  </strong>
+                </div>
+                <div>
+                  <span>Login</span>
+                  <strong>{loginStateLabel}</strong>
+                </div>
+                <div>
+                  <span>Errors</span>
+                  <strong>{captureErrorCount}</strong>
+                </div>
               </div>
             </div>
             <div className="backend-status-topline">
