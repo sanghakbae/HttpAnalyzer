@@ -3,7 +3,6 @@ import { onAuthStateChanged } from "firebase/auth";
 import {
   getFirebaseAuth,
   isFirebaseClientReady,
-  loadRecentFromFirebaseClient,
   saveInspectionSummaryToFirebase,
   signInWithGooglePopup,
   signOutFirebaseUser
@@ -265,31 +264,23 @@ function sortRecentRows(rows, valueSelector) {
 }
 
 async function loadRecentFromAllSources() {
-  const [backendData, firebaseData] = await Promise.all([
-    loadRecentFromBackend().catch(() => ({
-      harAnalyses: [],
-      captureEvents: [],
-      inspectionRuns: [],
-      dbBacked: false
-    })),
-    loadRecentFromFirebaseClient().catch(() => ({
-      harAnalyses: [],
-      captureEvents: [],
-      inspectionRuns: [],
-      dbBacked: false
-    }))
-  ]);
+  const backendData = await loadRecentFromBackend().catch(() => ({
+    harAnalyses: [],
+    captureEvents: [],
+    inspectionRuns: [],
+    dbBacked: false
+  }));
 
   const harAnalyses = sortRecentRows(
     dedupeRecentRows(
-      [...(backendData.harAnalyses || []), ...(firebaseData.harAnalyses || [])],
+      backendData.harAnalyses || [],
       (item) => String(item.id || item.fingerprint || `${item.file_name || ""}:${item.created_at || ""}`)
     ),
     (item) => item.created_at
   );
   const captureEvents = sortRecentRows(
     dedupeRecentRows(
-      [...(backendData.captureEvents || []), ...(firebaseData.captureEvents || [])],
+      backendData.captureEvents || [],
       (item) =>
         String(
           item.id ||
@@ -300,7 +291,7 @@ async function loadRecentFromAllSources() {
   );
   const inspectionRuns = sortRecentRows(
     dedupeRecentRows(
-      [...(backendData.inspectionRuns || []), ...(firebaseData.inspectionRuns || [])],
+      backendData.inspectionRuns || [],
       (item) =>
         String(
           item.id ||
@@ -314,7 +305,7 @@ async function loadRecentFromAllSources() {
     harAnalyses,
     captureEvents,
     inspectionRuns,
-    dbBacked: Boolean(backendData.dbBacked || firebaseData.dbBacked)
+    dbBacked: Boolean(backendData.dbBacked)
   };
 }
 

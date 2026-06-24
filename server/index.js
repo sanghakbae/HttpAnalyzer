@@ -1465,11 +1465,11 @@ async function loadRecentHarAnalyses(limit = 10) {
   return data.docs.map((document) => document.data());
 }
 
-const recentCaptureEventsLimit = Number(process.env.RECENT_CAPTURE_EVENTS_LIMIT || 100);
+const recentCaptureEventsLimit = Number(process.env.RECENT_CAPTURE_EVENTS_LIMIT || 0);
 const recentInspectionRunsLimit = Number(process.env.RECENT_INSPECTION_RUNS_LIMIT || 100);
 
 async function loadRecentCaptureEvents(limit = recentCaptureEventsLimit) {
-  if (!firestore) {
+  if (!firestore || limit <= 0) {
     return [];
   }
 
@@ -2361,9 +2361,12 @@ app.post("/api/analyze-har", upload.single("har"), async (request, response) => 
 });
 
 app.get("/api/recent-analyses", async (_request, response) => {
+  const includeEvents = ["1", "true", "yes"].includes(
+    String(_request.query?.includeEvents || "").toLowerCase()
+  );
   const [harAnalyses, captureEvents, inspectionRuns] = await Promise.allSettled([
     loadRecentHarAnalyses(10),
-    loadRecentCaptureEvents(),
+    includeEvents ? loadRecentCaptureEvents() : Promise.resolve([]),
     loadRecentInspectionRuns()
   ]);
 

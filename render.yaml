@@ -30,7 +30,7 @@ services:
       - key: CAPTURE_LOGIN_WAIT_MS
         value: "3000"
       - key: RECENT_CAPTURE_EVENTS_LIMIT
-        value: "100"
+        value: "0"
       - key: RECENT_INSPECTION_RUNS_LIMIT
         value: "100"
       - key: DISABLE_SQLMAP
