@@ -4,8 +4,6 @@ import {
   getFirebaseAuth,
   isFirebaseClientReady,
   loadRecentFromFirebaseClient,
-  saveCaptureEventsToFirebase,
-  saveInspectionRunToFirebase,
   saveInspectionSummaryToFirebase,
   signInWithGooglePopup,
   signOutFirebaseUser
@@ -4005,18 +4003,12 @@ export default function App() {
       lastReason = error instanceof Error ? error.message : "Backend DB save failed.";
     }
 
-    if (isFirebaseClientReady()) {
-      const firebaseResult = await saveInspectionRunToFirebase(payload).catch((error) => ({
-        saved: false,
-        reason: error instanceof Error ? error.message : "Firebase save failed."
-      }));
-      if (firebaseResult?.saved) {
-        return { ...run, ...(firebaseResult.id ? { id: firebaseResult.id } : {}), pending_sync: false };
-      }
-      lastReason = firebaseResult?.reason || lastReason;
-    }
-
-    throw new Error(`DB 저장 실패: ${lastReason || "Firebase/Firestore 설정을 확인해주세요."}`);
+    throw new Error(
+      `DB 저장 실패: ${
+        lastReason ||
+        "서버 Firebase Admin 설정(FIREBASE_SERVICE_ACCOUNT_JSON 또는 FIREBASE_* 환경변수)을 확인해주세요."
+      }`
+    );
   }
 
   async function saveCaptureEventsToDatabase(events) {
@@ -4046,18 +4038,12 @@ export default function App() {
       lastReason = error instanceof Error ? error.message : "Backend capture event save failed.";
     }
 
-    if (isFirebaseClientReady()) {
-      const firebaseResult = await saveCaptureEventsToFirebase(validEvents).catch((error) => ({
-        saved: false,
-        reason: error instanceof Error ? error.message : "Firebase event save failed."
-      }));
-      if (firebaseResult?.saved) {
-        return firebaseResult;
-      }
-      lastReason = firebaseResult?.reason || lastReason;
-    }
-
-    throw new Error(`DB 요청 이력 저장 실패: ${lastReason || "Firebase/Firestore 설정을 확인해주세요."}`);
+    throw new Error(
+      `DB 요청 이력 저장 실패: ${
+        lastReason ||
+        "서버 Firebase Admin 설정(FIREBASE_SERVICE_ACCOUNT_JSON 또는 FIREBASE_* 환경변수)을 확인해주세요."
+      }`
+    );
   }
 
   async function syncAiSummaryRecord(summaryRecord, options = {}) {
@@ -4648,7 +4634,7 @@ export default function App() {
           ? selectedCaptureMode === "manual"
             ? "새창 수동 캡처가 시작되었습니다. 열린 창에서 직접 이동하면 요청/응답이 캡처됩니다."
             : ""
-          : "캡처가 시작되었습니다. 종료 시 Firebase DB 저장을 시도합니다."
+          : "캡처가 시작되었습니다. 서버 DB가 설정되지 않아 종료 후 Recent Data에 저장되지 않습니다."
       );
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
@@ -6067,6 +6053,11 @@ export default function App() {
     : backendHealth.openAiSummaryConfigured
       ? "Server key"
       : "OpenAI empty";
+  const dbSyncLabel = backendHealth.databaseConfigured
+    ? pendingLocalSyncCount > 0
+      ? `${pendingLocalSyncCount} pending summary sync`
+      : "DB connected"
+    : "DB not configured";
   const overviewModuleCards = [
     {
       key: "capture",
@@ -6130,8 +6121,8 @@ export default function App() {
       key: "settings",
       label: "Settings",
       value: openAiSummaryReady ? "OpenAI set" : "OpenAI empty",
-      meta: backendHealth.ok ? "Backend online" : "Backend issue",
-      detail: pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending summary sync` : openAiSummarySource,
+      meta: backendHealth.databaseConfigured ? "DB connected" : "DB not configured",
+      detail: openAiSummarySource,
       action: "설정 보기"
     }
   ];
@@ -6632,7 +6623,7 @@ export default function App() {
                     </div>
                     <div className="overview-command-meta">
                       <span>{backendHealth.ok ? "Backend Online" : "Backend Check Needed"}</span>
-                      <span>{pendingLocalSyncCount > 0 ? `${pendingLocalSyncCount} pending sync` : "DB synced"}</span>
+                      <span>{dbSyncLabel}</span>
                     </div>
                   </div>
                   <div className="overview-module-grid">
