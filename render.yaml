@@ -33,6 +33,14 @@ services:
         value: "0"
       - key: RECENT_INSPECTION_RUNS_LIMIT
         value: "100"
+      - key: R2_HAR_ANALYSIS_INDEX_KEY
+        value: har/recent-index.json
+      - key: R2_HAR_ANALYSIS_INDEX_LIMIT
+        value: "50"
+      - key: R2_INSPECTION_INDEX_KEY
+        value: inspections/recent-index.json
+      - key: R2_INSPECTION_INDEX_LIMIT
+        value: "100"
       - key: DISABLE_SQLMAP
         value: "true"
       - key: OPENAI_API_KEY

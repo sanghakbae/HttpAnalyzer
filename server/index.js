@@ -7,7 +7,7 @@ import { existsSync } from "fs";
 import fs from "fs/promises";
 import multer from "multer";
 import path from "path";
-import { S3Client, PutObjectCommand } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { cert, getApps, initializeApp } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import { chromium } from "playwright";
@@ -229,11 +229,10 @@ const captureState = {
 
 const attachedCapturePages = new WeakSet();
 const memoryRecentCaptureEvents = [];
-const firestoreCollectionNames = {
-  harAnalyses: "capture_har_analyses",
-  captureEvents: "capture_http_events",
-  inspectionRuns: "capture_inspection_runs"
-};
+const r2HarAnalysisIndexKey = process.env.R2_HAR_ANALYSIS_INDEX_KEY || "har/recent-index.json";
+const r2HarAnalysisIndexLimit = Number(process.env.R2_HAR_ANALYSIS_INDEX_LIMIT || 50);
+const r2InspectionIndexKey = process.env.R2_INSPECTION_INDEX_KEY || "inspections/recent-index.json";
+const r2InspectionIndexLimit = Number(process.env.R2_INSPECTION_INDEX_LIMIT || 100);
 
 function sortByIsoDesc(rows, getValue) {
   return [...rows].sort((left, right) => {
@@ -261,6 +260,169 @@ function buildR2ObjectUrl(key) {
   }
 
   return `${r2PublicBaseUrl.replace(/\/$/, "")}/${key}`;
+}
+
+async function streamToString(stream) {
+  if (!stream) {
+    return "";
+  }
+
+  if (typeof stream.transformToString === "function") {
+    return stream.transformToString();
+  }
+
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+async function putR2Json(key, payload) {
+  if (!r2Client || !r2Bucket) {
+    return { saved: false, reason: "Cloudflare R2 is not configured." };
+  }
+
+  await r2Client.send(
+    new PutObjectCommand({
+      Bucket: r2Bucket,
+      Key: key,
+      Body: JSON.stringify(payload, null, 2),
+      ContentType: "application/json; charset=utf-8"
+    })
+  );
+
+  return {
+    saved: true,
+    provider: "cloudflare-r2",
+    key,
+    url: buildR2ObjectUrl(key)
+  };
+}
+
+async function getR2Json(key, fallback = null) {
+  if (!r2Client || !r2Bucket) {
+    return fallback;
+  }
+
+  try {
+    const result = await r2Client.send(
+      new GetObjectCommand({
+        Bucket: r2Bucket,
+        Key: key
+      })
+    );
+    const raw = await streamToString(result.Body);
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (error) {
+    const name = error?.name || "";
+    const statusCode = error?.$metadata?.httpStatusCode;
+    if (name === "NoSuchKey" || statusCode === 404) {
+      return fallback;
+    }
+    throw error;
+  }
+}
+
+function buildInspectionObjectKey(id, endedAt = new Date().toISOString()) {
+  const date = String(endedAt || new Date().toISOString()).slice(0, 10);
+  return `inspections/runs/${date}/${sanitizeFileName(id)}.json`;
+}
+
+function buildCaptureEventsObjectKey(id, endedAt = new Date().toISOString()) {
+  const date = String(endedAt || new Date().toISOString()).slice(0, 10);
+  return `inspections/events/${date}/${sanitizeFileName(id)}.json`;
+}
+
+function buildHarAnalysisObjectKey(id, createdAt = new Date().toISOString()) {
+  const date = String(createdAt || new Date().toISOString()).slice(0, 10);
+  return `har/analyses/${date}/${sanitizeFileName(id)}.json`;
+}
+
+function buildHarAnalysisIndexRow(record, objectKey, objectUrl = "") {
+  return {
+    id: record.id,
+    created_at: record.created_at,
+    file_name: record.file_name,
+    file_size: record.file_size,
+    total_entries: record.total_entries,
+    average_wait_ms: record.average_wait_ms,
+    slowest_url: record.slowest_url,
+    methods: record.methods || {},
+    top_hosts: Array.isArray(record.top_hosts) ? record.top_hosts : [],
+    status_codes: record.status_codes || {},
+    content_types: record.content_types || {},
+    failed_requests: Array.isArray(record.failed_requests) ? record.failed_requests : [],
+    storage_provider: record.storage_provider || "cloudflare-r2",
+    storage_key: objectKey,
+    storage_url: objectUrl,
+    har_storage_key: record.har_storage_key || null,
+    har_storage_url: record.har_storage_url || null
+  };
+}
+
+function buildInspectionIndexRow(run, objectKey, objectUrl = "") {
+  return {
+    id: run.id,
+    created_at: run.created_at,
+    capture_session_id: run.capture_session_id ?? null,
+    target_url: run.target_url,
+    started_at: run.started_at ?? null,
+    ended_at: run.ended_at ?? null,
+    total_exchanges: run.total_exchanges ?? 0,
+    total_errors: run.total_errors ?? 0,
+    total_findings: run.total_findings ?? 0,
+    critical_findings: run.critical_findings ?? 0,
+    high_findings: run.high_findings ?? 0,
+    security_only: Boolean(run.security_only),
+    mask_sensitive: Boolean(run.mask_sensitive),
+    excluded_patterns: Array.isArray(run.excluded_patterns) ? run.excluded_patterns : [],
+    owasp_summary: Array.isArray(run.owasp_summary) ? run.owasp_summary : [],
+    endpoint_summary: Array.isArray(run.endpoint_summary) ? run.endpoint_summary : [],
+    report_snapshot: run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {},
+    storage_provider: "cloudflare-r2",
+    storage_key: objectKey,
+    storage_url: objectUrl
+  };
+}
+
+async function updateR2InspectionIndex(row) {
+  const current = await getR2Json(r2InspectionIndexKey, { inspectionRuns: [] });
+  const rows = Array.isArray(current?.inspectionRuns) ? current.inspectionRuns : [];
+  const nextRows = sortByIsoDesc(
+    [
+      row,
+      ...rows.filter(
+        (item) =>
+          item.id !== row.id &&
+          (!row.capture_session_id || item.capture_session_id !== row.capture_session_id)
+      )
+    ],
+    (item) => item.created_at || item.ended_at
+  ).slice(0, r2InspectionIndexLimit);
+
+  await putR2Json(r2InspectionIndexKey, {
+    updated_at: new Date().toISOString(),
+    inspectionRuns: nextRows
+  });
+
+  return nextRows;
+}
+
+async function updateR2HarAnalysisIndex(row) {
+  const current = await getR2Json(r2HarAnalysisIndexKey, { harAnalyses: [] });
+  const rows = Array.isArray(current?.harAnalyses) ? current.harAnalyses : [];
+  const nextRows = sortByIsoDesc(
+    [row, ...rows.filter((item) => item.id !== row.id)],
+    (item) => item.created_at
+  ).slice(0, r2HarAnalysisIndexLimit);
+
+  await putR2Json(r2HarAnalysisIndexKey, {
+    updated_at: new Date().toISOString(),
+    harAnalyses: nextRows
+  });
+
+  return nextRows;
 }
 
 async function uploadHarFileToR2(file) {
@@ -1141,6 +1303,17 @@ function buildCaptureSummaryPayload(capture) {
 }
 
 async function saveAnalysisRecord(payload, file) {
+  if (!r2Client || !r2Bucket) {
+    return {
+      saved: false,
+      reason: "Cloudflare R2 is not configured.",
+      fileSaved: false,
+      fileProvider: null,
+      objectKey: null,
+      objectUrl: null
+    };
+  }
+
   let fileStorage = { uploaded: false, reason: "Cloudflare R2 is not configured." };
 
   try {
@@ -1152,43 +1325,40 @@ async function saveAnalysisRecord(payload, file) {
     };
   }
 
-  if (!firestore) {
-    return {
-      saved: false,
-      reason: "Firebase credentials are not configured.",
-      fileSaved: Boolean(fileStorage.uploaded),
-      fileProvider: fileStorage.provider || null,
-      objectKey: fileStorage.key || null,
-      objectUrl: fileStorage.url || null
-    };
-  }
-
   const recordId = buildRecordId("har-analysis");
   const createdAt = new Date().toISOString();
+  const objectKey = buildHarAnalysisObjectKey(recordId, createdAt);
+  const record = {
+    id: recordId,
+    created_at: createdAt,
+    ...payload,
+    storage_provider: "cloudflare-r2",
+    storage_bucket: r2Bucket,
+    storage_key: objectKey,
+    storage_url: buildR2ObjectUrl(objectKey),
+    storage_uploaded: true,
+    storage_reason: "",
+    har_storage_provider: fileStorage.provider || (fileStorage.uploaded ? "cloudflare-r2" : null),
+    har_storage_bucket: fileStorage.bucket || null,
+    har_storage_key: fileStorage.key || null,
+    har_storage_url: fileStorage.url || null,
+    har_storage_uploaded: Boolean(fileStorage.uploaded),
+    har_storage_reason: fileStorage.reason || ""
+  };
 
-  await firestore
-    .collection(firestoreCollectionNames.harAnalyses)
-    .doc(recordId)
-    .set({
-      id: recordId,
-      created_at: createdAt,
-      ...payload,
-      storage_provider: fileStorage.provider || (fileStorage.uploaded ? "cloudflare-r2" : null),
-      storage_bucket: fileStorage.bucket || null,
-      storage_key: fileStorage.key || null,
-      storage_url: fileStorage.url || null,
-      storage_uploaded: Boolean(fileStorage.uploaded),
-      storage_reason: fileStorage.reason || ""
-    });
+  const stored = await putR2Json(objectKey, record);
+  await updateR2HarAnalysisIndex(buildHarAnalysisIndexRow(record, objectKey, stored.url));
 
   return {
     saved: true,
-    provider: "firebase-firestore",
+    provider: "cloudflare-r2",
     id: recordId,
     fileSaved: Boolean(fileStorage.uploaded),
     fileProvider: fileStorage.provider || null,
     objectKey: fileStorage.key || null,
     objectUrl: fileStorage.url || null,
+    analysisKey: objectKey,
+    analysisUrl: stored.url,
     reason: fileStorage.uploaded ? "" : fileStorage.reason || ""
   };
 }
@@ -1243,147 +1413,68 @@ async function saveCaptureEventsBatch(events) {
     return { saved: true, count: 0, skipped: Array.isArray(events) ? events.length : 0 };
   }
 
-  if (!firestore) {
-    return { saved: false, reason: "Firebase credentials are not configured." };
+  if (!r2Client || !r2Bucket) {
+    return { saved: false, reason: "Cloudflare R2 is not configured." };
   }
 
-  const sessionIds = [
-    ...new Set(
-      validEvents
-        .map((event) => event.capture_session_id)
-        .filter((sessionId) => isUuid(sessionId))
-    )
-  ];
-  const existingFingerprints = new Set();
-
-  if (sessionIds.length > 0) {
-    for (let index = 0; index < sessionIds.length; index += 10) {
-      const sessionChunk = sessionIds.slice(index, index + 10);
-      const snapshot = await firestore
-        .collection(firestoreCollectionNames.captureEvents)
-        .where("capture_session_id", "in", sessionChunk)
-        .get();
-
-      for (const document of snapshot.docs) {
-        existingFingerprints.add(buildCaptureEventFingerprint(document.data()));
-      }
-    }
-  }
-
-  const eventsToInsert = validEvents.filter(
-    (event) => !existingFingerprints.has(buildCaptureEventFingerprint(event))
-  );
-
-  if (eventsToInsert.length === 0) {
-    return { saved: true, count: 0, skipped: validEvents.length };
-  }
-
-  const batch = firestore.batch();
   const createdAt = new Date().toISOString();
-
-  for (const event of eventsToInsert) {
-    const documentRef = firestore
-      .collection(firestoreCollectionNames.captureEvents)
-      .doc(buildRecordId("capture-event"));
-    batch.set(documentRef, {
-      id: documentRef.id,
-      created_at: createdAt,
-      ...event
-    });
-  }
-
-  await batch.commit();
+  const sessionId = validEvents.find((event) => event.capture_session_id)?.capture_session_id || buildRecordId("capture");
+  const objectKey = buildCaptureEventsObjectKey(sessionId, createdAt);
+  const storedEvents = validEvents.map((event, index) => ({
+    id: event.id || `capture-event-${index + 1}`,
+    created_at: createdAt,
+    ...event
+  }));
+  const stored = await putR2Json(objectKey, {
+    id: sessionId,
+    created_at: createdAt,
+    event_count: storedEvents.length,
+    events: storedEvents
+  });
 
   return {
     saved: true,
-    count: eventsToInsert.length,
-    skipped: validEvents.length - eventsToInsert.length
+    provider: stored.provider,
+    key: stored.key,
+    url: stored.url,
+    count: storedEvents.length,
+    skipped: 0
   };
 }
 
 async function saveInspectionRun(payload) {
-  if (!firestore) {
+  if (!r2Client || !r2Bucket) {
     return {
       saved: false,
-      reason: "Firebase credentials are not configured. Inspection runs must be persisted to Firestore."
+      reason: "Cloudflare R2 is not configured. Inspection runs must be persisted as JSON files."
     };
   }
 
-  if (isUuid(payload.capture_session_id)) {
-    const existingSnapshot = await firestore
-      .collection(firestoreCollectionNames.inspectionRuns)
-      .where("capture_session_id", "==", payload.capture_session_id)
-      .limit(1)
-      .get();
+  const runId = payload.id || payload.capture_session_id || buildRecordId("inspection-run");
+  const run = {
+    id: runId,
+    created_at: payload.created_at || payload.ended_at || new Date().toISOString(),
+    ...payload
+  };
+  const objectKey = buildInspectionObjectKey(runId, run.ended_at || run.created_at);
+  const stored = await putR2Json(objectKey, run);
+  const indexRow = buildInspectionIndexRow(run, objectKey, stored.url);
+  await updateR2InspectionIndex(indexRow);
 
-    if (!existingSnapshot.empty) {
-      const existingDocument = existingSnapshot.docs[0];
-      const existing = existingDocument.data();
-      const existingReportSnapshot =
-        existing.report_snapshot && typeof existing.report_snapshot === "object"
-          ? existing.report_snapshot
-          : {};
-      const nextSnapshot =
-        payload.report_snapshot && typeof payload.report_snapshot === "object"
-          ? payload.report_snapshot
-          : {};
-      try {
-        await firestore
-          .collection(firestoreCollectionNames.inspectionRuns)
-          .doc(existingDocument.id)
-          .set({
-          ...existing,
-          ...payload,
-          id: existing.id || existingDocument.id,
-          report_snapshot: {
-            ...existingReportSnapshot,
-            ...nextSnapshot,
-            aiSummary: nextSnapshot.aiSummary || existingReportSnapshot.aiSummary,
-            aiSummaryMeta: nextSnapshot.aiSummaryMeta || existingReportSnapshot.aiSummaryMeta
-          }
-        });
-
-        return { saved: true, updated: true, id: existing.id || existingDocument.id };
-      } catch (error) {
-        return {
-          saved: false,
-          reason: error instanceof Error ? error.message : "Firebase update failed."
-        };
-      }
-    }
-  }
-
-  try {
-    const documentRef = firestore
-      .collection(firestoreCollectionNames.inspectionRuns)
-      .doc(payload.id || buildRecordId("inspection-run"));
-
-    await documentRef.set({
-      id: documentRef.id,
-      created_at: payload.created_at || payload.ended_at || new Date().toISOString(),
-      ...payload
-    });
-  } catch (error) {
-    return {
-      saved: false,
-      reason: error instanceof Error ? error.message : "Firebase insert failed."
-    };
-  }
-
-  return { saved: true };
-}
-
-function isUuid(value) {
-  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
-    String(value || "")
-  );
+  return {
+    saved: true,
+    provider: stored.provider,
+    id: runId,
+    key: objectKey,
+    url: stored.url
+  };
 }
 
 async function saveInspectionRunSummary(payload) {
-  if (!firestore) {
+  if (!r2Client || !r2Bucket) {
     return {
       saved: false,
-      reason: "Firebase credentials are not configured. Inspection summaries must be persisted to Firestore."
+      reason: "Cloudflare R2 is not configured. Inspection summaries must be persisted as JSON files."
     };
   }
 
@@ -1391,109 +1482,103 @@ async function saveInspectionRunSummary(payload) {
     return { saved: false, reason: "summary is required." };
   }
 
-  let snapshot = null;
-  try {
-    if (isUuid(payload.capture_session_id)) {
-      snapshot = await firestore
-        .collection(firestoreCollectionNames.inspectionRuns)
-        .where("capture_session_id", "==", payload.capture_session_id)
-        .limit(10)
-        .get();
-    } else if (payload.target_url) {
-      snapshot = await firestore
-        .collection(firestoreCollectionNames.inspectionRuns)
-        .where("target_url", "==", payload.target_url)
-        .limit(10)
-        .get();
-    } else {
-      return { saved: false, reason: "capture_session_id or target_url is required." };
-    }
-  } catch (error) {
-    return {
-      saved: false,
-      reason: error instanceof Error ? error.message : "Failed to look up inspection run."
-    };
+  if (!payload.capture_session_id && !payload.target_url) {
+    return { saved: false, reason: "capture_session_id or target_url is required." };
   }
 
-  const runDocument = sortByIsoDesc(snapshot.docs, (document) => document.data()?.ended_at)[0] || null;
-  if (!runDocument) {
+  const index = await getR2Json(r2InspectionIndexKey, { inspectionRuns: [] });
+  const rows = Array.isArray(index?.inspectionRuns) ? index.inspectionRuns : [];
+  const candidates = rows.filter((row) => {
+    if (payload.capture_session_id && row.capture_session_id === payload.capture_session_id) {
+      return true;
+    }
+    return payload.target_url && row.target_url === payload.target_url;
+  });
+  const indexRow = sortByIsoDesc(candidates, (row) => row.ended_at || row.created_at)[0] || null;
+
+  if (!indexRow?.storage_key) {
     return { saved: false, reason: "No matching inspection run was found." };
   }
 
-  const run = runDocument.data();
+  const storedRun = await getR2Json(indexRow.storage_key, null);
+  const run = storedRun && typeof storedRun === "object" ? storedRun : indexRow;
   const summaryMeta =
     payload.summary_meta && typeof payload.summary_meta === "object" ? payload.summary_meta : {};
   const reportSnapshot =
     run.report_snapshot && typeof run.report_snapshot === "object" ? run.report_snapshot : {};
 
-  try {
-    await firestore
-      .collection(firestoreCollectionNames.inspectionRuns)
-      .doc(runDocument.id)
-      .set({
-        ...run,
-        report_snapshot: {
-          ...reportSnapshot,
-          aiSummary: payload.summary,
-          aiSummaryMeta: {
-            ...summaryMeta,
-            syncedAt: new Date().toISOString()
-          }
-        }
-      });
-  } catch (error) {
-    return {
-      saved: false,
-      reason: error instanceof Error ? error.message : "Failed to update inspection summary."
-    };
-  }
+  const updatedRun = {
+    ...run,
+    report_snapshot: {
+      ...reportSnapshot,
+      aiSummary: payload.summary,
+      aiSummaryMeta: {
+        ...summaryMeta,
+        syncedAt: new Date().toISOString()
+      }
+    }
+  };
 
-  return { saved: true, id: run.id || runDocument.id };
+  await putR2Json(indexRow.storage_key, updatedRun);
+  await updateR2InspectionIndex(
+    buildInspectionIndexRow(
+      updatedRun,
+      indexRow.storage_key,
+      indexRow.storage_url || buildR2ObjectUrl(indexRow.storage_key)
+    )
+  );
+
+  return {
+    saved: true,
+    provider: "cloudflare-r2",
+    id: updatedRun.id || indexRow.id,
+    key: indexRow.storage_key,
+    url: indexRow.storage_url || buildR2ObjectUrl(indexRow.storage_key)
+  };
 }
 
 async function loadRecentHarAnalyses(limit = 10) {
-  if (!firestore) {
+  if (!r2Client || !r2Bucket) {
     return [];
   }
 
-  const snapshot = await firestore
-    .collection(firestoreCollectionNames.harAnalyses)
-    .orderBy("created_at", "desc")
-    .limit(limit);
-
-  const data = await snapshot.get();
-  return data.docs.map((document) => document.data());
+  const index = await getR2Json(r2HarAnalysisIndexKey, { harAnalyses: [] });
+  const rows = Array.isArray(index?.harAnalyses) ? index.harAnalyses : [];
+  return sortByIsoDesc(rows, (item) => item.created_at).slice(0, limit);
 }
 
 const recentCaptureEventsLimit = Number(process.env.RECENT_CAPTURE_EVENTS_LIMIT || 0);
 const recentInspectionRunsLimit = Number(process.env.RECENT_INSPECTION_RUNS_LIMIT || 100);
 
 async function loadRecentCaptureEvents(limit = recentCaptureEventsLimit) {
-  if (!firestore || limit <= 0) {
+  if (limit <= 0) {
     return [];
   }
 
-  const snapshot = await firestore
-    .collection(firestoreCollectionNames.captureEvents)
-    .orderBy("created_at", "desc")
-    .limit(limit);
+  const index = await getR2Json(r2InspectionIndexKey, { inspectionRuns: [] });
+  const rows = Array.isArray(index?.inspectionRuns) ? index.inspectionRuns : [];
+  const eventFiles = sortByIsoDesc(rows, (row) => row.ended_at || row.created_at)
+    .map((row) => row.capture_events_key)
+    .filter(Boolean)
+    .slice(0, limit);
+  const loaded = await Promise.all(
+    eventFiles.map(async (key) => {
+      const data = await getR2Json(key, { events: [] });
+      return Array.isArray(data?.events) ? data.events : [];
+    })
+  );
 
-  const data = await snapshot.get();
-  return data.docs.map((document) => document.data());
+  return sortByIsoDesc(loaded.flat(), (event) => event.created_at || event.request_timestamp).slice(0, limit);
 }
 
 async function loadRecentInspectionRuns(limit = recentInspectionRunsLimit) {
-  if (!firestore) {
+  if (!r2Client || !r2Bucket) {
     return [];
   }
 
-  const snapshot = await firestore
-    .collection(firestoreCollectionNames.inspectionRuns)
-    .orderBy("created_at", "desc")
-    .limit(limit);
-
-  const data = await snapshot.get();
-  return data.docs.map((document) => document.data());
+  const index = await getR2Json(r2InspectionIndexKey, { inspectionRuns: [] });
+  const rows = Array.isArray(index?.inspectionRuns) ? index.inspectionRuns : [];
+  return sortByIsoDesc(rows, (item) => item.created_at || item.ended_at).slice(0, limit);
 }
 
 function attachCaptureListeners(page, targetHost) {
@@ -2006,7 +2091,7 @@ app.get("/api/health", (_request, response) => {
     service: "http-analyzer-api",
     databaseConfigured: Boolean(firestore),
     databaseProvider: firestore ? "firebase-firestore" : "",
-    capturePersistenceReady: Boolean(firestore),
+    capturePersistenceReady: Boolean(r2Client && r2Bucket),
     objectStorageConfigured: Boolean(r2Client && r2Bucket),
     objectStorageProvider: r2Client && r2Bucket ? "cloudflare-r2" : "",
     captureDisabled: disableCapture,
@@ -2386,7 +2471,9 @@ app.get("/api/recent-analyses", async (_request, response) => {
     captureEvents: captureEvents.status === "fulfilled" ? captureEvents.value : [],
     inspectionRuns: inspectionRuns.status === "fulfilled" ? inspectionRuns.value : [],
     partialErrors: errors,
-    dbBacked: Boolean(firestore)
+    dbBacked: false,
+    fileBacked: Boolean(r2Client && r2Bucket),
+    storageProvider: r2Client && r2Bucket ? "cloudflare-r2" : ""
   });
 });
 

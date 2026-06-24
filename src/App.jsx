@@ -3,7 +3,6 @@ import { onAuthStateChanged } from "firebase/auth";
 import {
   getFirebaseAuth,
   isFirebaseClientReady,
-  saveInspectionSummaryToFirebase,
   signInWithGooglePopup,
   signOutFirebaseUser
 } from "./firebaseClient";
@@ -305,7 +304,9 @@ async function loadRecentFromAllSources() {
     harAnalyses,
     captureEvents,
     inspectionRuns,
-    dbBacked: Boolean(backendData.dbBacked)
+    dbBacked: Boolean(backendData.dbBacked),
+    fileBacked: Boolean(backendData.fileBacked),
+    storageProvider: backendData.storageProvider || ""
   };
 }
 
@@ -3218,6 +3219,7 @@ export default function App() {
     databaseProvider: "",
     objectStorageConfigured: false,
     objectStorageProvider: "",
+    capturePersistenceReady: false,
     captureDisabled: null,
     openAiSummaryConfigured: false
   });
@@ -3597,6 +3599,7 @@ export default function App() {
           databaseProvider: data?.databaseProvider || "",
           objectStorageConfigured: Boolean(data?.objectStorageConfigured),
           objectStorageProvider: data?.objectStorageProvider || "",
+          capturePersistenceReady: Boolean(data?.capturePersistenceReady),
           captureDisabled:
             typeof data?.captureDisabled === "boolean" ? data.captureDisabled : null,
           openAiSummaryConfigured: Boolean(data?.openAiSummaryConfigured)
@@ -3616,6 +3619,7 @@ export default function App() {
           databaseProvider: "",
           objectStorageConfigured: false,
           objectStorageProvider: "",
+          capturePersistenceReady: false,
           captureDisabled: null,
           openAiSummaryConfigured: false
         });
@@ -3737,7 +3741,7 @@ export default function App() {
               void refreshRecentAnalysesOnce().catch(() => null);
             } catch (saveError) {
               setStatusMessage(
-                saveError instanceof Error ? saveError.message : "캡처 결과 DB 저장에 실패했습니다."
+                saveError instanceof Error ? saveError.message : "캡처 결과 파일 저장에 실패했습니다."
               );
               return;
             }
@@ -3991,13 +3995,12 @@ export default function App() {
       }
       lastReason = data?.reason || data?.error || rawText || `HTTP ${response.status}`;
     } catch (error) {
-      lastReason = error instanceof Error ? error.message : "Backend DB save failed.";
+      lastReason = error instanceof Error ? error.message : "Backend file save failed.";
     }
 
     throw new Error(
-      `DB 저장 실패: ${
-        lastReason ||
-        "서버 Firebase Admin 설정(FIREBASE_SERVICE_ACCOUNT_JSON 또는 FIREBASE_* 환경변수)을 확인해주세요."
+      `파일 저장 실패: ${
+        lastReason || "서버 Cloudflare R2 설정(R2_* 환경변수)을 확인해주세요."
       }`
     );
   }
@@ -4069,11 +4072,6 @@ export default function App() {
       saved = response.ok;
     } catch {
       saved = false;
-    }
-
-    if (!saved && isFirebaseClientReady()) {
-      const result = await saveInspectionSummaryToFirebase(payload).catch(() => ({ saved: false }));
-      saved = Boolean(result?.saved);
     }
 
     if (!saved) {
@@ -4621,11 +4619,11 @@ export default function App() {
       captureApiBaseUrlRef.current = captureApiBaseUrl;
 
       setStatusMessage(
-        backendHealth.databaseConfigured
+        backendHealth.capturePersistenceReady
           ? selectedCaptureMode === "manual"
             ? "새창 수동 캡처가 시작되었습니다. 열린 창에서 직접 이동하면 요청/응답이 캡처됩니다."
             : ""
-          : "캡처가 시작되었습니다. 서버 DB가 설정되지 않아 종료 후 Recent Data에 저장되지 않습니다."
+          : "캡처가 시작되었습니다. 서버 파일 저장소가 설정되지 않아 종료 후 Recent Data에 저장되지 않습니다."
       );
       setCaptureSessionId(result.sessionId || "");
       setCaptureStartedAt(result.startedAt || "");
@@ -6044,11 +6042,11 @@ export default function App() {
     : backendHealth.openAiSummaryConfigured
       ? "Server key"
       : "OpenAI empty";
-  const dbSyncLabel = backendHealth.databaseConfigured
+  const dbSyncLabel = backendHealth.capturePersistenceReady
     ? pendingLocalSyncCount > 0
       ? `${pendingLocalSyncCount} pending summary sync`
-      : "DB connected"
-    : "DB not configured";
+      : "File storage connected"
+    : "File storage not configured";
   const overviewModuleCards = [
     {
       key: "capture",
@@ -6112,7 +6110,7 @@ export default function App() {
       key: "settings",
       label: "Settings",
       value: openAiSummaryReady ? "OpenAI set" : "OpenAI empty",
-      meta: backendHealth.databaseConfigured ? "DB connected" : "DB not configured",
+      meta: backendHealth.capturePersistenceReady ? "File storage connected" : "File storage not configured",
       detail: openAiSummarySource,
       action: "설정 보기"
     }
@@ -6312,7 +6310,7 @@ export default function App() {
                     : "enabled"}
               </span>
               <span>
-                DB:{" "}
+                HAR DB:{" "}
                 {backendHealth.databaseConfigured
                   ? backendHealth.databaseProvider || "connected"
                   : "not set"}
@@ -6745,7 +6743,7 @@ export default function App() {
                         <span>
                           저장 상태:{" "}
                           {harUploadResult.storage?.saved
-                            ? "DB 저장 완료"
+                            ? "서버 저장 완료"
                             : harUploadResult.storage?.reason || "로컬 분석 결과"}
                         </span>
                         <span>총 요청: {harUploadResult.summary?.totalEntries ?? 0}</span>
@@ -6776,7 +6774,7 @@ export default function App() {
                             >
                               <span className="har-history-name">{item.displayFileName}</span>
                               <span className="har-history-meta">
-                                {item.historySource === "local" ? "로컬" : "DB"} ·{" "}
+                                {item.historySource === "local" ? "로컬" : "서버"} ·{" "}
                                 {formatDateTime(item.displayCreatedAt)} · 요청 {item.summary?.totalEntries ?? 0}건
                               </span>
                             </button>
@@ -6792,9 +6790,9 @@ export default function App() {
                           <span>
                             저장 상태:{" "}
                             {selectedHarHistory.historySource === "db"
-                              ? "DB 저장 완료"
+                              ? "서버 저장 완료"
                               : harUploadResult?.storage?.saved
-                              ? "DB 저장 완료"
+                              ? "서버 저장 완료"
                               : harUploadResult?.storage?.reason || "로컬 분석 결과"}
                           </span>
                           <span>총 요청: {selectedHarHistory.summary?.totalEntries ?? 0}</span>

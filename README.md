@@ -5,7 +5,7 @@
 이 프로젝트는 세 가지 축으로 구성됩니다.
 
 - `mitmproxy`로 실시간 트래픽을 가로채고 수정/관찰
-- `Node + Express` 서버로 캡처 상태, HAR 분석, 리플레이, Firebase/Cloudflare 저장 처리
+- `Node + Express` 서버로 캡처 상태, HAR 분석, 리플레이, Cloudflare R2 파일 저장 처리
 - `React + Vite` 프런트엔드로 요청/응답 확인, 보안 패턴 분석, 리포트 출력
 
 ## 핵심 기능
@@ -25,7 +25,7 @@
 - 엔드포인트 우선순위 정리
 - `Before / After` 비교용 Diff
 - `HTML / PDF / JSON / Markdown / CSV` 리포트 출력
-- HAR 분석 결과, 실시간 캡처 이벤트, 점검 이력을 Firebase Firestore에 저장
+- 캡처 이벤트와 점검 이력을 Cloudflare R2 JSON 파일로 저장
 - 업로드된 HAR 원본 파일을 Cloudflare R2에 저장
 
 ## 현재 UI에서 지원하는 보안 분석
@@ -96,8 +96,8 @@
 - npm
 - Python 3.9+
 - `mitmproxy`
-- Firebase 프로젝트(Firestore)
 - Cloudflare R2 버킷
+- Firebase 프로젝트(Auth, 선택적 HAR 분석 이력)
 - SQLMap(Optional, 로컬 Injection 점검 시 필요)
 
 ## 빠른 시작
@@ -152,6 +152,10 @@ CLOUDFLARE_R2_ACCESS_KEY_ID=<r2-access-key-id>
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-access-key>
 CLOUDFLARE_R2_BUCKET=http-analyzer-files
 CLOUDFLARE_R2_PUBLIC_BASE_URL=https://<public-bucket-host>
+R2_HAR_ANALYSIS_INDEX_KEY=har/recent-index.json
+R2_HAR_ANALYSIS_INDEX_LIMIT=50
+R2_INSPECTION_INDEX_KEY=inspections/recent-index.json
+R2_INSPECTION_INDEX_LIMIT=100
 ```
 
 로컬에서 프런트와 백엔드를 같이 실행할 때는 `VITE_API_BASE_URL=http://127.0.0.1:5000`으로 바꿔도 됩니다.
@@ -161,12 +165,12 @@ CLOUDFLARE_R2_PUBLIC_BASE_URL=https://<public-bucket-host>
 설명:
 
 - `VITE_*`
-  프런트에서 사용하는 값입니다. `VITE_FIREBASE_*`는 Firebase Auth와 Firestore 클라이언트 fallback에 사용합니다.
+  프런트에서 사용하는 값입니다. `VITE_FIREBASE_*`는 Firebase Auth에 사용합니다.
 - `FIREBASE_SERVICE_ACCOUNT_JSON`
   또는 `FIREBASE_PROJECT_ID`, `FIREBASE_CLIENT_EMAIL`, `FIREBASE_PRIVATE_KEY`, `FIREBASE_SERVICE_ACCOUNT_PATH`
-  서버에서 Firestore에 점검 이력과 캡처 이벤트를 저장할 때 사용합니다.
+  서버에서 Firebase Admin을 초기화할 때만 사용합니다. 캡처/분석 결과 저장에는 사용하지 않습니다.
 - `CLOUDFLARE_R2_*`
-  HAR 원본 파일을 Cloudflare R2에 업로드할 때 사용합니다.
+  캡처 이벤트, 점검 이력, HAR 원본 파일을 Cloudflare R2에 업로드할 때 사용합니다.
 - `HOST`
   로컬은 보통 `127.0.0.1`, Render 같은 배포 환경은 `0.0.0.0`을 사용합니다.
 - `DISABLE_CAPTURE`
@@ -332,7 +336,7 @@ npm run dev
 - 콘텐츠 타입 분포
 - 실패 요청 목록
 
-분석 자체는 Firebase 없이도 가능하지만, 결과를 DB에 저장하려면 Firestore 서버 키와 Cloudflare R2 설정이 필요합니다.
+분석 자체는 Firebase 없이도 가능하지만, 결과 파일을 서버에 저장하려면 Cloudflare R2 설정이 필요합니다.
 
 ### Recent Data
 
@@ -343,36 +347,29 @@ npm run dev
 - 최근 7일 / 30일 기준 통계 대시보드
 - 점검 이력 상세 모달
 - 점검 이력별 `HTML / PDF` 리포트 재다운로드
-- 항목별 저장 출처(`DB`)
+- 항목별 저장 출처(`Cloudflare R2`)
 
 중요:
 
-- 캡처 결과는 Firebase/Firestore DB 저장이 성공해야 `Recent Data`에 표시됩니다.
-- DB 저장이 실패하면 로컬 대기 항목으로 표시하지 않고 저장 실패 메시지를 보여줍니다.
-- 서버 Firestore 인증 또는 Firebase 클라이언트 설정이 필요합니다.
+- 캡처 결과는 Cloudflare R2 파일 저장이 성공해야 `Recent Data`에 표시됩니다.
+- 파일 저장이 실패하면 로컬 대기 항목으로 표시하지 않고 저장 실패 메시지를 보여줍니다.
+- `Recent Data`는 R2의 `inspections/recent-index.json` 인덱스를 기준으로 표시합니다.
 
 ## Firebase / Cloudflare 저장 구조
 
-### 저장 대상 컬렉션
+### Firestore
 
-이 프로젝트는 아래 Firestore 컬렉션을 사용합니다.
+- 현재 캡처/분석 결과 저장에는 Firestore 컬렉션을 사용하지 않습니다.
+- Firebase는 인증과 기존 프로젝트 호환 목적으로만 남아 있습니다.
 
-#### 1. HAR 분석 결과
+### Cloudflare R2
 
-- `capture_har_analyses`
-
-#### 2. 실시간 캡처 이벤트
-
-- `capture_http_events`
-
-#### 3. 점검 이력 / 리포트 스냅샷
-
-- `capture_inspection_runs`
-
-### 파일 저장소
-
-- HAR 원본 파일과 생성 리포트 첨부 파일은 Cloudflare R2에 저장합니다.
-- 메타데이터는 Firestore에, 바이너리 파일은 R2에 저장하는 구조입니다.
+- 캡처 이벤트: `inspections/events/YYYY-MM-DD/<session-id>.json`
+- 점검 이력 / 리포트 스냅샷: `inspections/runs/YYYY-MM-DD/<run-id>.json`
+- Recent Data 인덱스: `inspections/recent-index.json`
+- HAR 분석 결과: `har/analyses/YYYY-MM-DD/<analysis-id>.json`
+- HAR 분석 인덱스: `har/recent-index.json`
+- HAR 원본 파일과 생성 리포트 첨부 파일도 Cloudflare R2에 저장합니다.
 
 주의:
 
@@ -425,6 +422,10 @@ CLOUDFLARE_R2_ACCESS_KEY_ID=<r2-access-key-id>
 CLOUDFLARE_R2_SECRET_ACCESS_KEY=<r2-secret-access-key>
 CLOUDFLARE_R2_BUCKET=<r2-bucket-name>
 CLOUDFLARE_R2_PUBLIC_BASE_URL=<public-bucket-host>
+R2_HAR_ANALYSIS_INDEX_KEY=har/recent-index.json
+R2_HAR_ANALYSIS_INDEX_LIMIT=50
+R2_INSPECTION_INDEX_KEY=inspections/recent-index.json
+R2_INSPECTION_INDEX_LIMIT=100
 ```
 
 배포 백엔드에서도 캡처 API를 사용할 수 있도록 `DISABLE_CAPTURE=false`로 둡니다.
@@ -458,14 +459,13 @@ Render에서 서비스 이름이 이미 사용 중이면 실제 생성된 URL을
 
 ### 현재 워크스페이스 상태
 
-이 저장소는 서버에서 다음 컬렉션/저장소를 사용하도록 구성되어 있습니다.
+이 저장소는 서버에서 다음 Cloudflare R2 경로를 사용하도록 구성되어 있습니다.
 
-- Firestore
-  - `capture_har_analyses`
-  - `capture_http_events`
-  - `capture_inspection_runs`
-- Cloudflare R2
-  - `har/YYYY-MM-DD/...` 경로에 HAR 원본 저장
+- `har/analyses/YYYY-MM-DD/...` 경로에 HAR 분석 결과 저장
+- `har/recent-index.json` 경로에 HAR 최근 이력 인덱스 저장
+- `inspections/events/YYYY-MM-DD/...` 경로에 캡처 이벤트 저장
+- `inspections/runs/YYYY-MM-DD/...` 경로에 점검 이력과 리포트 스냅샷 저장
+- `inspections/recent-index.json` 경로에 Recent Data 인덱스 저장
 
 ## 리포트 출력
 
@@ -553,13 +553,14 @@ finding이 많이 몰린 엔드포인트를 우선순위로 정리합니다.
 
 ### Recent Data 저장 정책
 
-최근 점검 이력과 캡처 이벤트는 DB 저장 성공 기준으로 관리합니다.
+최근 점검 이력과 캡처 이벤트는 Cloudflare R2 파일 저장 성공 기준으로 관리합니다.
 
-- 1차: 서버 Firestore 저장
-- 2차: 서버 Firestore 인증이 없을 때 Firebase 클라이언트 Firestore 저장
-- 3차: HAR 원본/첨부 파일은 Cloudflare R2 저장
+- 캡처 이벤트: R2 JSON 파일로 저장
+- 점검 이력: R2 JSON 파일로 저장
+- HAR 분석 결과: R2 JSON 파일로 저장
+- Recent Data: R2 인덱스 파일에서 최근 점검 이력만 조회
 
-DB 저장이 실패하면 `Recent Data`에 로컬 대기 항목을 만들지 않고 저장 실패 메시지를 보여줍니다. `Recent Data`에는 Firestore에서 확인된 이력만 표시합니다.
+파일 저장이 실패하면 `Recent Data`에 로컬 대기 항목을 만들지 않고 저장 실패 메시지를 보여줍니다.
 
 ## 개발 팁
 
