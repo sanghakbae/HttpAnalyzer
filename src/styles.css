@@ -792,6 +792,11 @@ button:disabled {
 
 .export-menu {
   position: relative;
+  z-index: 10;
+}
+
+.export-menu[open] {
+  z-index: 40;
 }
 
 .export-menu summary {
@@ -821,8 +826,8 @@ button:disabled {
 .export-menu-list {
   position: absolute;
   top: calc(100% + 8px);
-  left: 0;
-  z-index: 5;
+  right: 0;
+  z-index: 60;
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -832,6 +837,10 @@ button:disabled {
   background: linear-gradient(180deg, #1f2937, #111827);
   border: 1px solid rgba(148, 163, 184, 0.18);
   box-shadow: 0 12px 28px rgba(0, 0, 0, 0.28);
+}
+
+.export-menu:not([open]) .export-menu-list {
+  display: none;
 }
 
 .export-menu-list button {
@@ -3257,8 +3266,9 @@ body {
   display: grid;
   grid-template-columns: repeat(5, minmax(140px, 1fr));
   align-items: stretch;
-  overflow-x: auto;
-  overflow-y: hidden;
+  position: relative;
+  z-index: 6;
+  overflow: visible !important;
   scrollbar-width: thin;
 }
 
