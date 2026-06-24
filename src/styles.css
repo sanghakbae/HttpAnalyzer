@@ -3970,14 +3970,18 @@ button,
 }
 
 .capture-checklist-row-title {
-  display: grid;
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
 }
 
 .capture-checklist-row-title strong {
   color: #10233e;
   font-size: 15px;
   font-weight: 900;
+  flex: 0 0 auto;
+  line-height: 1.1;
 }
 
 .capture-checklist-row-meta {
@@ -6320,7 +6324,7 @@ pre {
 .capture-checklist-row-meta {
   display: flex !important;
   align-items: center !important;
-  gap: 8px !important;
+  gap: 6px !important;
   line-height: 1 !important;
 }
 
@@ -6330,12 +6334,11 @@ pre {
   display: inline-flex !important;
   align-items: center !important;
   justify-content: center !important;
-  height: 32px !important;
-  min-height: 32px !important;
+  height: 24px !important;
+  min-height: 24px !important;
   margin: 0 !important;
-  padding-top: 0 !important;
-  padding-bottom: 0 !important;
-  line-height: 32px !important;
+  padding: 3px 8px !important;
+  line-height: 1 !important;
   vertical-align: middle !important;
 }
 
@@ -6476,7 +6479,7 @@ pre {
 .capture-checklist-row-cell p,
 .capture-checklist-row-cell li,
 .capture-checklist-row-cell code {
-  font-size: 14px !important;
+  font-size: 10px !important;
 }
 
 .inspection-run-item {
@@ -6509,7 +6512,7 @@ pre {
 .capture-checklist-row-meta > span,
 .capture-checklist-row-meta .severity-chip,
 .capture-checklist-row-meta .security-summary-pill {
-  font-size: 14px !important;
+  font-size: 12px !important;
 }
 
 .section-title,
