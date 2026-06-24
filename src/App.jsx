@@ -21,11 +21,8 @@ const LOCAL_AI_SUMMARIES_KEY = "http-analyzer-local-ai-summaries";
 const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
-const LOCAL_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
-const API_BASE_URL =
-  typeof window !== "undefined" && LOCAL_HOSTNAMES.has(window.location.hostname)
-    ? LOCAL_API_BASE_URL
-    : import.meta.env.VITE_API_BASE_URL || LOCAL_API_BASE_URL;
+const LOCAL_API_BASE_URL = import.meta.env.VITE_LOCAL_API_BASE_URL || "http://127.0.0.1:5000";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || LOCAL_API_BASE_URL;
 const TOKEN_REGEX = new RegExp(
   `("(?:\\\\.|[^"])*":)|("(?:\\\\.|[^"])*")|('(?:\\\\.|[^'])*')|(<!--.*?-->)|(<!DOCTYPE[^>]*>)|(</?[\\w:-]+[^>]*>)|\\b\\d+(?:\\.\\d+)?\\b|\\btrue\\b|\\bfalse\\b|\\bnull\\b|[{}\\[\\](),:]`,
   "g"
@@ -208,6 +205,10 @@ function isLocalRuntime() {
   }
 
   return LOCAL_HOSTNAMES.has(window.location.hostname);
+}
+
+function getManualCaptureApiBaseUrl() {
+  return isLocalRuntime() ? API_BASE_URL : LOCAL_API_BASE_URL;
 }
 
 async function postCaptureStart(apiBaseUrl, payload) {
@@ -3125,6 +3126,7 @@ export default function App() {
   const summarizedSessionRef = useRef("");
   const loginFailurePopupKeyRef = useRef("");
   const capturePayloadSignatureRef = useRef("");
+  const captureApiBaseUrlRef = useRef(API_BASE_URL);
   const pdfFontPromiseRef = useRef(null);
   const readOnlyDeployment = false;
   const [authUser, setAuthUser] = useState(() => getStoredAuthUser());
@@ -3670,7 +3672,8 @@ export default function App() {
 
     const syncCaptureStatus = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/api/capture/status`);
+        const captureApiBaseUrl = activeRef.current ? captureApiBaseUrlRef.current : API_BASE_URL;
+        const response = await fetch(`${captureApiBaseUrl}/api/capture/status`);
         if (!response.ok) return;
         const data = await response.json();
         const nextActive = Boolean(data.active);
@@ -3684,6 +3687,9 @@ export default function App() {
 
         activeRef.current = nextActive;
         setActive(nextActive);
+        if (!nextActive && wasActive) {
+          captureApiBaseUrlRef.current = API_BASE_URL;
+        }
         setCaptureSessionId(data.sessionId || "");
         setCaptureStartedAt(data.startedAt || "");
         setCaptureMeta({
@@ -4621,18 +4627,20 @@ export default function App() {
         captureMode: selectedCaptureMode
       };
 
+      const captureApiBaseUrl =
+        selectedCaptureMode === "manual" ? getManualCaptureApiBaseUrl() : API_BASE_URL;
       let result;
-      if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
-        try {
-          result = await postCaptureStart(LOCAL_API_BASE_URL, capturePayload);
-        } catch (localError) {
+      try {
+        result = await postCaptureStart(captureApiBaseUrl, capturePayload);
+      } catch (captureError) {
+        if (selectedCaptureMode === "manual" && !isLocalRuntime()) {
           throw new Error(
-            `자동 캡처용 로컬 백엔드(${LOCAL_API_BASE_URL})에 연결할 수 없습니다. 로컬 앱/백엔드를 실행한 뒤 다시 시도해주세요.`
+            `새창 수동 캡처는 사용자 PC의 로컬 백엔드(${LOCAL_API_BASE_URL})가 실행 중이어야 합니다. 로컬 백엔드를 실행한 뒤 다시 시도해주세요.`
           );
         }
-      } else {
-        result = await postCaptureStart(API_BASE_URL, capturePayload);
+        throw captureError;
       }
+      captureApiBaseUrlRef.current = captureApiBaseUrl;
 
       setStatusMessage(
         backendHealth.databaseConfigured
@@ -4724,7 +4732,7 @@ export default function App() {
       );
       setErrors((current) => current.filter((item) => !isAbortedErrorText(item.errorText)));
 
-      await fetch(`${API_BASE_URL}/api/capture/stop`, { method: "POST" });
+      await fetch(`${captureApiBaseUrlRef.current}/api/capture/stop`, { method: "POST" });
       await requestCaptureCompletionSummary(
         {
           targetUrl: domain || getStoredValue("http-analyzer-domain") || "",
@@ -4737,6 +4745,7 @@ export default function App() {
       setStatusMessage("");
       setActive(false);
       activeRef.current = false;
+      captureApiBaseUrlRef.current = API_BASE_URL;
       capturePayloadSignatureRef.current = "";
       setCaptureSessionId("");
       setCaptureStartedAt("");

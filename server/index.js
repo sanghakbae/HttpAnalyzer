@@ -3,6 +3,7 @@ import { execFile } from "child_process";
 import { randomUUID } from "crypto";
 import dotenv from "dotenv";
 import express from "express";
+import { existsSync } from "fs";
 import fs from "fs/promises";
 import multer from "multer";
 import path from "path";
@@ -53,6 +54,8 @@ const r2Endpoint =
 const disableCapture = process.env.DISABLE_CAPTURE === "true";
 const playwrightHeadless =
   process.env.PLAYWRIGHT_HEADLESS === "true" || Boolean(process.env.RENDER);
+const chromeExecutablePath =
+  process.env.PLAYWRIGHT_CHROME_EXECUTABLE || "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 const captureReadyDelayMs = Number(process.env.CAPTURE_READY_DELAY_MS || 3000);
 const captureIdleAutoStopMs = Number(process.env.CAPTURE_IDLE_AUTO_STOP_MS || 10000);
 const captureCrawlEnabled = process.env.CAPTURE_CRAWL_ENABLED !== "false";
@@ -1751,7 +1754,11 @@ async function launchCaptureSession(domain, excludePatterns = [], authOptions = 
 
   if (captureMode === "manual") {
     launchOptions.ignoreDefaultArgs = ["--no-startup-window"];
-    launchOptions.channel = "chrome";
+    if (existsSync(chromeExecutablePath)) {
+      launchOptions.executablePath = chromeExecutablePath;
+    } else {
+      launchOptions.channel = "chrome";
+    }
   }
 
   const browser = await chromium.launch(launchOptions);
@@ -1973,6 +1980,14 @@ app.post("/api/capture/start", async (request, response) => {
   }
 
   const { domain, excludePatterns, credentials, sessionValue, captureMode } = request.body ?? {};
+  const nextCaptureMode = captureMode === "session" ? "session" : "manual";
+
+  if (nextCaptureMode === "manual" && process.env.RENDER) {
+    response.status(409).json({
+      error: "Manual browser capture must be started from the local backend on the user's machine."
+    });
+    return;
+  }
 
   try {
     await launchCaptureSession(
@@ -1981,7 +1996,7 @@ app.post("/api/capture/start", async (request, response) => {
       {
         credentials: credentials && typeof credentials === "object" ? credentials : {},
         sessionValue: typeof sessionValue === "string" ? sessionValue : "",
-        captureMode: captureMode === "session" ? "session" : "manual"
+        captureMode: nextCaptureMode
       }
     );
     response.json({
