@@ -21,7 +21,7 @@ const LOCAL_AI_SUMMARIES_KEY = "http-analyzer-local-ai-summaries";
 const OPENAI_SETTINGS_KEY = "http-analyzer-openai-settings";
 const ABORTED_ERROR_REGEX = /net::ERR_ABORTED/i;
 const LOCAL_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
-const LOCAL_API_BASE_URL = "http://127.0.0.1:4000";
+const LOCAL_API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 const API_BASE_URL =
   typeof window !== "undefined" && LOCAL_HOSTNAMES.has(window.location.hostname)
     ? LOCAL_API_BASE_URL
@@ -5002,41 +5002,41 @@ export default function App() {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>HTTP Analyzer Report</title>
   <style>
-    body{margin:0;padding:24px;background:#eef2f6;color:#172033;font-family:"KoPubDotum","KoPub돋움체",sans-serif}
+    body{margin:0;padding:24px;background:#eef2f6;color:#172033;font-family:"KoPubDotum","KoPub돋움체","KoPub 돋움체",-apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo","Malgun Gothic","Segoe UI",Roboto,Helvetica,Arial,sans-serif}
     .wrap{max-width:1400px;margin:0 auto}
-    .cover{padding:28px;border-radius:20px;background:linear-gradient(180deg,#e8f3eb,#dff1e6);border:1px solid #b9ddc4;box-shadow:0 12px 32px rgba(15,23,42,.08);margin-bottom:16px}
+    .cover{padding:28px;border-radius:5px;background:linear-gradient(180deg,#e8f3eb,#dff1e6);border:1px solid #b9ddc4;box-shadow:0 12px 32px rgba(15,23,42,.08);margin-bottom:16px}
     .cover h1{margin:0 0 10px;font-size:34px}
     .cover p{margin:6px 0;color:#355240}
-    .conclusion{margin-top:16px;padding:14px 16px;border-radius:14px;background:#fff;border:1px solid #d8e0ea}
-    .hero{padding:20px 24px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
+    .conclusion{margin-top:16px;padding:14px 16px;border-radius:5px;background:#fff;border:1px solid #d8e0ea}
+    .hero{padding:20px 24px;border-radius:5px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
     .hero h1{margin:0 0 8px;font-size:28px}
     .hero p{margin:4px 0;color:#475569}
-    .ai-summary{margin-top:16px;padding:16px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
+    .ai-summary{margin-top:16px;padding:16px;border-radius:5px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 12px 32px rgba(15,23,42,.08)}
     .ai-summary h2{margin:0 0 8px;font-size:20px;color:#172033}
     .ai-summary p{margin:0 0 12px;color:#64748b;font-size:13px}
-    .pair-card{margin-top:16px;padding:16px;border-radius:16px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 10px 24px rgba(15,23,42,.06)}
+    .pair-card{margin-top:16px;padding:16px;border-radius:5px;background:#fff;border:1px solid #d8e0ea;box-shadow:0 10px 24px rgba(15,23,42,.06)}
     .pair-index{margin-bottom:10px;font-weight:700;color:#64748b}
     .pair-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
     .findings{margin-top:16px;display:grid;gap:10px}
     .findings h4{margin:0;font-size:16px;color:#7c2d12}
     .owasp-summary{display:flex;flex-wrap:wrap;gap:8px}
-    .owasp-chip{display:inline-flex;padding:4px 8px;border-radius:999px;background:#fef3c7;color:#92400e;font-size:12px;font-weight:700}
-    .finding-card{padding:12px;border-radius:12px;border:1px solid #fcd34d;background:#fffbeb}
+    .owasp-chip{display:inline-flex;padding:4px 8px;border-radius:5px;background:#fef3c7;color:#92400e;font-size:12px;font-weight:700}
+    .finding-card{padding:12px;border-radius:5px;border:1px solid #fcd34d;background:#fffbeb}
     .finding-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}
     .finding-head span{font-size:12px;font-weight:700;color:#92400e}
-    .finding-card p{margin:6px 0;color:#78350f;font-size:13px;line-height:1.45}
+    .finding-card p{margin:6px 0;color:#78350f;font-size:13px;line-height:1.35}
     .finding-checklist strong{display:block;margin-top:8px;color:#7c2d12}
     .finding-checklist ul{margin:6px 0 0 18px;padding:0}
-    .finding-checklist li{margin:4px 0;color:#78350f;font-size:13px;line-height:1.4}
-    .box{padding:14px;border-radius:12px}
+    .finding-checklist li{margin:4px 0;color:#78350f;font-size:13px;line-height:1.35}
+    .box{padding:14px;border-radius:5px}
     .request{background:#eef7ff;border:1px solid #c7defc}
     .response{background:#fff6ec;border:1px solid #ffd5b5}
-    .chip{display:inline-flex;padding:4px 8px;border-radius:999px;font-size:12px;font-weight:700;margin-bottom:10px}
+    .chip{display:inline-flex;padding:4px 8px;border-radius:5px;font-size:12px;font-weight:700;margin-bottom:10px}
     .request-chip{background:#dbeafe;color:#1d4ed8}
     .response-chip{background:#ffedd5;color:#c2410c}
     h3{margin:0 0 6px;font-size:16px;word-break:break-all}
     .meta{margin:0 0 12px;color:#64748b;font-size:13px}
-    pre{margin:0;padding:12px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height:1.4;color:#334155}
+    pre{margin:0;padding:12px;border-radius:5px;background:#f8fafc;border:1px solid #e2e8f0;white-space:pre-wrap;word-break:break-word;font-size:12px;line-height: 1.35;color:#334155}
     @media (max-width: 900px){.pair-grid{grid-template-columns:1fr}}
     @media print{body{background:#fff;padding:0}.wrap{max-width:none}.pair-card,.hero{box-shadow:none}${forPrint ? "" : ""}}
   </style>
@@ -5915,6 +5915,7 @@ export default function App() {
     {
       key: "sqli",
       title: "SQL Injection",
+      severity: "high",
       description:
         "쿼리 문자열, 폼 바디, JSON payload, path 파라미터가 SQL 실행에 영향을 줄 수 있는지 점검합니다. 정상 입력과 공격 입력의 응답 본문, 상태 코드, 응답 시간 차이를 비교하고 prepared statement가 일관되게 적용되는지 확인합니다.",
       example: "예: id=1' OR '1'='1, q=test' UNION SELECT NULL--, SLEEP(5)"
@@ -5922,6 +5923,7 @@ export default function App() {
     {
       key: "xss",
       title: "Cross-Site Scripting (XSS)",
+      severity: "high",
       description:
         "신뢰할 수 없는 입력이 HTML, DOM, JavaScript, 템플릿에 컨텍스트별 인코딩 없이 반영되는지 확인합니다. innerHTML, document.write, eval 같은 위험 sink에 도달 가능한지와 CSP가 실제로 실행을 제한하는지도 함께 봅니다.",
       example: "예: <script>alert(1)</script>, \"><img src=x onerror=alert(1)>"
@@ -5929,6 +5931,7 @@ export default function App() {
     {
       key: "idor",
       title: "IDOR / Authorization Bypass",
+      severity: "high",
       description:
         "객체 ID, 계정 번호, 주문 번호, 문서 키만 바꿔도 다른 사용자의 데이터에 접근 가능한지 확인합니다. 서버가 클라이언트 식별자를 신뢰하지 않고 소유권 및 권한 검사를 수행하는지 검증합니다.",
       example: "예: /api/orders/1001 -> /api/orders/1002 변경 시 다른 사용자의 주문이 반환되는지 확인"
@@ -5936,6 +5939,7 @@ export default function App() {
     {
       key: "auth",
       title: "Authentication / Session Management",
+      severity: "high",
       description:
         "로그인, 로그아웃, 토큰 갱신, 쿠키 속성, 세션 무효화 동작을 점검합니다. 보호된 엔드포인트가 인증 없는 접근을 차단하는지, 로그아웃 후 활성 세션이나 토큰이 실제로 폐기되는지 확인합니다.",
       example: "예: 로그아웃 후 기존 SESSIONID가 계속 동작하거나 /api/member/profile 이 무인증으로 응답"
@@ -5943,6 +5947,7 @@ export default function App() {
     {
       key: "cors",
       title: "CORS / Cross-Origin Policy",
+      severity: "medium",
       description:
         "교차 출처 접근이 신뢰된 Origin으로만 제한되는지, 인증된 cross-origin 응답 읽기가 가능한지 점검합니다. Origin 반사 동작, wildcard 규칙, preflight 응답, credential 사용 여부를 악성 Origin 기준으로 테스트합니다.",
       example: "예: Origin: https://evil.example 이 반사되고 Access-Control-Allow-Credentials: true 가 함께 응답"
@@ -5950,6 +5955,7 @@ export default function App() {
     {
       key: "path-traversal",
       title: "Path Traversal / File Access",
+      severity: "high",
       description:
         "파일명, 경로, 템플릿, 다운로드 파라미터가 의도된 디렉터리 경계를 벗어날 수 있는지 테스트합니다. 인코딩된 traversal payload, 슬래시 변형, 중첩 경로 입력을 포함해 민감 파일 읽기/덮어쓰기가 가능한지 확인합니다.",
       example: "예: ../../etc/passwd, ..%2f..%2fapp.env"
@@ -5957,6 +5963,7 @@ export default function App() {
     {
       key: "cmdi",
       title: "Command Injection",
+      severity: "critical",
       description:
         "셸 명령이나 시스템 유틸리티를 호출하는 기능을 식별하고, 사용자 입력이 그 명령에 직접 이어붙는지 확인합니다. 구분자, 서브셸 문법, 환경변수 확장, 파일 기반 명령 인자가 임의 실행을 유발할 수 있는지 점검합니다.",
       example: "예: 127.0.0.1; id, test && whoami"
@@ -5964,6 +5971,7 @@ export default function App() {
     {
       key: "open-redirect",
       title: "Open Redirect",
+      severity: "low",
       description:
         "next, redirect, returnUrl, continue, destination 파라미터가 임의 외부 URL 이동을 허용하는지 점검합니다. 로그인, 로그아웃, 비밀번호 재설정, 결제 완료 흐름에서 악용 가능한지도 함께 확인합니다.",
       example: "예: /login?next=https://evil.example/phish"
@@ -5971,6 +5979,7 @@ export default function App() {
     {
       key: "secret",
       title: "Sensitive Data Exposure",
+      severity: "medium",
       description:
         "URL, 요청 바디, 응답 payload, 헤더, JavaScript 번들 안에서 secret, 자격증명, 개인정보, 내부 엔드포인트, 환경 정보가 노출되는지 확인합니다. 이런 값이 브라우저 캐시, 로그, source map에도 남는지 함께 검토합니다.",
       example: "예: access_token=..., Authorization: Bearer ..., source map에 내부 API 경로 노출"
@@ -5981,8 +5990,8 @@ export default function App() {
       captureChecklistItems.map((item) => ({
         key: item.key,
         title: item.title,
-        highestSeverity: "medium",
-        highestSeverityLabel: "Medium",
+        highestSeverity: item.severity,
+        highestSeverityLabel: SEVERITY_LABELS[item.severity] || item.severity,
         owaspLabel: "Manual Review",
         description: item.description,
         remediation: "연관된 요청/응답 흐름을 수동으로 검증하고, 실제로 확인되면 관련 백엔드 로직이나 헤더 설정 수정 우선순위를 높이세요.",
@@ -6099,7 +6108,7 @@ export default function App() {
       key: "checklist",
       icon: "checklist",
       label: "Vulnerability Checklist",
-      description: "One-row-per-vulnerability review board",
+      description: "취약점별 수동 점검 목록",
       count:
         allSecurityFindings.length > 0
           ? new Set(allSecurityFindings.map((finding) => getChecklistCategoryKey(finding.key))).size
@@ -6350,24 +6359,26 @@ export default function App() {
                 )}
               </div>
             </div>
-            <div className="dashboard-ribbon">
-              <div className="dashboard-ribbon-card">
-                <span className="dashboard-ribbon-label">Current Module</span>
-                <strong>{navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}</strong>
+            {activeSection === "overview" ? (
+              <div className="dashboard-ribbon">
+                <div className="dashboard-ribbon-card">
+                  <span className="dashboard-ribbon-label">Capture State</span>
+                  <strong>{captureStateLabel}</strong>
+                </div>
+                <div className="dashboard-ribbon-card">
+                  <span className="dashboard-ribbon-label">Security Findings</span>
+                  <strong>{allSecurityFindings.length}</strong>
+                </div>
+                <div className="dashboard-ribbon-card">
+                  <span className="dashboard-ribbon-label">Visible Requests</span>
+                  <strong>{visibleExchanges.length}</strong>
+                </div>
+                <div className="dashboard-ribbon-card">
+                  <span className="dashboard-ribbon-label">Recent HAR Runs</span>
+                  <strong>{mergedHarHistory.length}</strong>
+                </div>
               </div>
-              <div className="dashboard-ribbon-card">
-                <span className="dashboard-ribbon-label">Security Findings</span>
-                <strong>{allSecurityFindings.length}</strong>
-              </div>
-              <div className="dashboard-ribbon-card">
-                <span className="dashboard-ribbon-label">Visible Requests</span>
-                <strong>{visibleExchanges.length}</strong>
-              </div>
-              <div className="dashboard-ribbon-card">
-                <span className="dashboard-ribbon-label">Recent HAR Runs</span>
-                <strong>{mergedHarHistory.length}</strong>
-              </div>
-            </div>
+            ) : null}
             {readOnlyDeployment ? (
               <div className="readonly-banner">
                 배포 사이트는 조회 전용입니다. 캡처, Replay, HAR 업로드는 로컬 앱에서 실행하고
@@ -6376,8 +6387,13 @@ export default function App() {
             ) : null}
 
             {activeSection === "capture" ? (
-              <div className="capture-control-panel">
-                <form className="capture-form filter-bar" onSubmit={startCapture}>
+              <>
+                <div className="section-intro">
+                  <h2 className="section-title">Capture</h2>
+                  <p className="section-copy">실시간 캡처와 요청 목록</p>
+                </div>
+                <div className="capture-control-panel">
+                  <form className="capture-form filter-bar" onSubmit={startCapture}>
                   <div className="capture-mode-row">
                     <button
                       type="button"
@@ -6521,18 +6537,11 @@ export default function App() {
                     {aiSummaryError ? <div className="error-strip">{aiSummaryError}</div> : null}
                     {aiSummary ? <pre>{aiSummary}</pre> : null}
                   </div>
-                ) : null}
-              </div>
-            ) : activeSection === "overview" ||
-              activeSection === "findings" ||
-              activeSection === "har" ||
-              activeSection === "recent" ||
-              activeSection === "compare" ||
-              activeSection === "sqlmap" ||
-              activeSection === "api-test" ||
-              activeSection === "checklist" ||
-              activeSection === "settings" ? null : (
-              <div className={`section-intro ${activeSection === "findings" ? "findings-intro" : ""}`}>
+                  ) : null}
+                </div>
+              </>
+            ) : activeSection === "overview" ? null : (
+              <div className="section-intro">
                 <h2 className="section-title">
                   {navigationItems.find((item) => item.key === activeSection)?.label || "Overview"}
                 </h2>
@@ -7758,7 +7767,6 @@ export default function App() {
                             </span>
                           </div>
                         </div>
-                        <span className="capture-checklist-row-confidence">{item.confidence}</span>
                       </div>
                       <div className="capture-checklist-row-line">
                         <div className="capture-checklist-row-cell cell-summary">
