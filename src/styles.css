@@ -4186,6 +4186,13 @@ button,
   grid-template-columns: 1.4fr 0.8fr 0.8fr;
 }
 
+.tool-grid-sqlmap-main {
+  display: grid;
+  grid-template-columns: minmax(360px, 1fr) 160px 120px 120px;
+  gap: 18px;
+  width: 100%;
+}
+
 .tool-grid-span-2 {
   grid-column: span 2;
 }
@@ -4663,6 +4670,10 @@ button,
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .tool-grid-sqlmap-main {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .tool-grid-span-2 {
     grid-column: auto;
   }
@@ -4701,6 +4712,10 @@ button,
   .app-layout.sidebar-collapsed {
     display: block;
     min-height: 100vh;
+  }
+
+  .tool-grid-sqlmap-main {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .sidebar-card {

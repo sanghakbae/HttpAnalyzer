@@ -7146,16 +7146,16 @@ export default function App() {
                         ? "선택된 캡처 요청만 스캔합니다. Target URL과 Body는 선택된 요청 기준으로 조정됩니다."
                         : "아래 Captured Candidates에서 스캔할 요청을 먼저 선택하세요."}
                     </div>
-                    <label className="field-label field-card">
-                      <span>Target URL</span>
-                      <input
-                        type="text"
-                        placeholder="https://target.example/api?id=1"
-                        value={sqlmapForm.url}
-                        readOnly
-                      />
-                    </label>
-                    <div className="tool-grid-3">
+                    <div className="tool-grid-sqlmap-main">
+                      <label className="field-label field-card">
+                        <span>Target URL</span>
+                        <input
+                          type="text"
+                          placeholder="https://target.example/api?id=1"
+                          value={sqlmapForm.url}
+                          readOnly
+                        />
+                      </label>
                       <label className="field-label field-card">
                         <span>Method</span>
                         <select
